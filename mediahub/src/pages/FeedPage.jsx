@@ -147,141 +147,13 @@ function WeddingHero() {
   )
 }
 
-/* ─────────── Fullscreen photo/video lightbox ─────────── */
+/* ─────────── shared media helpers ─────────── */
 
 function isVideoItem(item) {
   if (!item) return false
   if (item.type === 'video') return true
   if (item.resourceType === 'video') return true
   return /\.(mp4|webm|mov|m4v|ogg)(\?|$)/i.test(item.url || '')
-}
-
-function PhotoLightbox({ post, index, setIndex, onClose, navigate }) {
-  const items = post ? getMediaItems(post) : []
-  const item = items[index]
-  const videoMode = isVideoItem(item)
-
-  useEffect(() => {
-    if (!post) return
-    const onKey = (e) => {
-      if (e.key === 'Escape') onClose()
-      if (e.key === 'ArrowLeft') setIndex((i) => (i - 1 + items.length) % items.length)
-      if (e.key === 'ArrowRight') setIndex((i) => (i + 1) % items.length)
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [post, items.length, onClose, setIndex])
-
-  useEffect(() => {
-    if (!post) return
-    const prevOverflow = document.body.style.overflow
-    document.body.style.overflow = 'hidden'
-    return () => { document.body.style.overflow = prevOverflow }
-  }, [post])
-
-  if (typeof document === 'undefined') return null
-
-  return createPortal(
-    <AnimatePresence>
-      {post && (
-        <motion.div
-          className="fixed inset-0 flex items-center justify-center"
-          style={{ background: 'rgba(0,0,0,0.92)', zIndex: 99999 }}
-          initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-          transition={{ duration: 0.2 }}
-          onClick={onClose}
-        >
-          <button
-            onClick={onClose}
-            aria-label="Close"
-            className="absolute top-4 right-4 z-10 w-10 h-10 rounded-full bg-white/10 hover:bg-white/20 text-white flex items-center justify-center"
-          >
-            <FiX size={20} />
-          </button>
-
-          {items.length > 1 && (
-            <>
-              <button
-                onClick={(e) => { e.stopPropagation(); setIndex((i) => (i - 1 + items.length) % items.length) }}
-                aria-label="Previous"
-                className="absolute left-3 sm:left-6 z-10 w-10 h-10 rounded-full bg-white/10 hover:bg-white/20 text-white flex items-center justify-center"
-              >
-                <FiChevronLeft size={22} />
-              </button>
-              <button
-                onClick={(e) => { e.stopPropagation(); setIndex((i) => (i + 1) % items.length) }}
-                aria-label="Next"
-                className="absolute right-3 sm:right-6 z-10 w-10 h-10 rounded-full bg-white/10 hover:bg-white/20 text-white flex items-center justify-center"
-              >
-                <FiChevronRight size={22} />
-              </button>
-            </>
-          )}
-
-          <AnimatePresence mode="wait">
-            {videoMode ? (
-              <motion.video
-                key={item?.url}
-                src={item?.url}
-                poster={item?.thumbnail}
-                controls
-                autoPlay
-                playsInline
-                initial={{ opacity: 0, scale: 0.96 }}
-                animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0, scale: 0.96 }}
-                transition={{ duration: 0.18 }}
-                className="max-w-[90vw] max-h-[80vh] object-contain rounded-lg"
-                onClick={(e) => e.stopPropagation()}
-              />
-            ) : (
-              <motion.img
-                key={item?.url}
-                src={item?.url}
-                alt={post.title || 'Photo'}
-                initial={{ opacity: 0, scale: 0.96 }}
-                animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0, scale: 0.96 }}
-                transition={{ duration: 0.18 }}
-                className="max-w-[90vw] max-h-[80vh] object-contain rounded-lg"
-                onClick={(e) => e.stopPropagation()}
-              />
-            )}
-          </AnimatePresence>
-
-          {/* ─── Bottom bar – now just a plain orange text link ─── */}
-          <div
-            className="absolute bottom-6 left-1/2 -translate-x-1/2 flex items-center gap-3 max-w-[90vw]"
-            onClick={(e) => e.stopPropagation()}
-          >
-            {post.title && (
-              <span className="text-white/70 text-xs font-medium truncate max-w-[40vw]">{post.title}</span>
-            )}
-            <motion.button
-              onClick={() => navigate(`/posts/${post._id}`)}
-              whileHover={{ scale: 1.02 }}
-              whileTap={{ scale: 0.98 }}
-              className="flex items-center gap-1.5 text-amber-400 font-bold text-sm hover:underline transition"
-            >
-              <FiExternalLink size={13} strokeWidth={2.5} /> View post
-            </motion.button>
-          </div>
-        </motion.div>
-      )}
-    </AnimatePresence>,
-    document.body
-  )
-}
-
-/* ─────────── Helpers ─────────── */
-
-function normalizeAuthor(u) {
-  if (!u) return null
-  return {
-    _id: u._id || u.id,
-    name: u.name || u.username || u.fullName || u.displayName || 'Unknown',
-    avatar: u.avatar || u.avatarUrl || u.profileImage || u.photo || null,
-  }
 }
 
 function MultiImageBadge({ count }) {
@@ -294,7 +166,23 @@ function MultiImageBadge({ count }) {
   )
 }
 
-/* ─────────── Boomerang video for GRID (always muted, ping-pong) ─────────── */
+function normalizeAuthor(u) {
+  if (!u) return null
+  return {
+    _id: u._id || u.id,
+    name: u.name || u.username || u.fullName || u.displayName || 'Unknown',
+    avatar: u.avatar || u.avatarUrl || u.profileImage || u.photo || null,
+  }
+}
+
+/* Deterministic rotation from post id so tiles don't jump on re-render */
+function hashStr(s) {
+  let h = 0
+  for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0
+  return Math.abs(h)
+}
+
+/* ─────────── Boomerang video (muted, ping-pong) ─────────── */
 
 function BoomerangVideo({ src, poster, className, style, onClick }) {
   const videoRef = useRef(null)
@@ -354,6 +242,216 @@ function BoomerangVideo({ src, poster, className, style, onClick }) {
       onClick={onClick}
       onError={(e) => { e.target.style.display = 'none' }}
     />
+  )
+}
+
+/* ─────────── Scrapbook collage — MODAL ONLY, used for multi-media posts
+   when the lightbox opens. Grid tiles keep the slider (unchanged). Photo
+   items render as polaroids; video items render as a looping boomerang clip
+   inside the same polaroid frame so videos actually play in the collage. */
+
+function ScrapbookCollage({ post, items }) {
+  const shown = items.slice(0, Math.min(3, items.length))
+  const seed = hashStr(post._id || 'x')
+
+  // Preset layouts for 2 & 3 items: position %, size %, rotation deg
+  const layouts = {
+    2: [
+      { top: '8%', left: '6%', w: '58%', rot: -6 },
+      { top: '30%', left: '38%', w: '58%', rot: 5 },
+    ],
+    3: [
+      { top: '4%', left: '4%', w: '52%', rot: -7 },
+      { top: '10%', left: '48%', w: '48%', rot: 6 },
+      { top: '48%', left: '20%', w: '58%', rot: -3 },
+    ],
+  }
+  const layout = layouts[shown.length] || layouts[3]
+
+  // Tape colors
+  const tapes = ['#8FA5D9', '#F5C542', '#8FA5D9']
+
+  return (
+    <div className="relative w-full h-full overflow-hidden" style={{ background: '#fdfaf3' }}>
+      {/* Yellow scribble decorations */}
+      <svg className="absolute inset-0 w-full h-full pointer-events-none z-0" viewBox="0 0 100 100" preserveAspectRatio="none">
+        <path d="M8 92 Q12 85 16 92 T24 92" stroke="#F5C542" strokeWidth="0.8" fill="none" strokeLinecap="round" />
+        <path d="M82 12 L88 8 M85 6 L91 12" stroke="#F5C542" strokeWidth="0.8" fill="none" strokeLinecap="round" />
+        <circle cx="90" cy="88" r="1.5" fill="none" stroke="#F5C542" strokeWidth="0.6" />
+        <path d="M6 40 Q9 38 12 40" stroke="#F5C542" strokeWidth="0.7" fill="none" strokeLinecap="round" />
+        <path d="M78 55 l3 -3 M78 52 l3 3" stroke="#F5C542" strokeWidth="0.7" strokeLinecap="round" />
+      </svg>
+
+      {shown.map((it, i) => {
+        const l = layout[i]
+        const rot = l.rot + ((seed >> (i * 3)) % 5) - 2
+        const tape = tapes[i % tapes.length]
+        const itemIsVideo = isVideoItem(it)
+        return (
+          <div
+            key={i}
+            className="absolute"
+            style={{
+              top: l.top,
+              left: l.left,
+              width: l.w,
+              transform: `rotate(${rot}deg)`,
+              zIndex: i + 1,
+              filter: 'drop-shadow(0 4px 10px rgba(0,0,0,0.18))',
+            }}
+          >
+            {/* Blue/gold tape strip */}
+            <div
+              className="absolute left-1/2 -translate-x-1/2 -top-2 z-10"
+              style={{
+                width: '38%',
+                height: 10,
+                background: tape,
+                opacity: 0.75,
+                boxShadow: 'inset 0 0 6px rgba(0,0,0,0.08)',
+              }}
+            />
+            {/* Photo / video (polaroid) */}
+            <div
+              className="w-full bg-white p-[3px] pb-[10px]"
+              style={{ boxShadow: '0 1px 2px rgba(0,0,0,0.15)' }}
+            >
+              <div className="w-full aspect-square overflow-hidden bg-neutral-200 relative">
+                {itemIsVideo ? (
+                  <BoomerangVideo src={it.url} poster={it.thumbnail} className="w-full h-full object-cover" />
+                ) : (
+                  <img
+                    src={it.url}
+                    alt=""
+                    className="w-full h-full object-cover"
+                    draggable={false}
+                    onError={(e) => { e.currentTarget.style.display = 'none' }}
+                  />
+                )}
+                {itemIsVideo && (
+                  <span className="absolute bottom-1 left-1 flex items-center gap-0.5 px-1 rounded"
+                    style={{ background: 'rgba(0,0,0,0.55)' }}>
+                    <FiPlay size={9} fill="white" color="white" />
+                  </span>
+                )}
+              </div>
+            </div>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+/* ─────────── Fullscreen photo/video lightbox ─────────── */
+
+function PhotoLightbox({ post, onClose, navigate }) {
+  const items = post ? getMediaItems(post) : []
+  const isMulti = items.length > 1
+  const item = items[0]
+  const videoMode = isVideoItem(item)
+
+  useEffect(() => {
+    if (!post) return
+    const onKey = (e) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [post, onClose])
+
+  useEffect(() => {
+    if (!post) return
+    const prevOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => { document.body.style.overflow = prevOverflow }
+  }, [post])
+
+  if (typeof document === 'undefined') return null
+
+  return createPortal(
+    <AnimatePresence>
+      {post && (
+        <motion.div
+          className="fixed inset-0 flex items-center justify-center"
+          style={{ background: 'rgba(0,0,0,0.92)', zIndex: 99999 }}
+          initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+          transition={{ duration: 0.2 }}
+          onClick={onClose}
+        >
+          <button
+            onClick={onClose}
+            aria-label="Close"
+            className="absolute top-4 right-4 z-30 w-10 h-10 rounded-full bg-white/10 hover:bg-white/20 text-white flex items-center justify-center"
+          >
+            <FiX size={20} />
+          </button>
+
+          {isMulti ? (
+            <motion.div
+              key={`scrapbook-${post._id}`}
+              initial={{ opacity: 0, scale: 0.96 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.96 }}
+              transition={{ duration: 0.18 }}
+              className="relative z-0 rounded-2xl overflow-hidden shadow-2xl"
+              style={{ width: 'min(92vw, 480px, 62vh)', aspectRatio: '4 / 5' }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <ScrapbookCollage post={post} items={items} />
+            </motion.div>
+          ) : (
+            <AnimatePresence mode="wait">
+              {videoMode ? (
+                <motion.video
+                  key={item?.url}
+                  src={item?.url}
+                  poster={item?.thumbnail}
+                  controls
+                  autoPlay
+                  playsInline
+                  initial={{ opacity: 0, scale: 0.96 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  exit={{ opacity: 0, scale: 0.96 }}
+                  transition={{ duration: 0.18 }}
+                  className="max-w-[90vw] max-h-[80vh] object-contain rounded-lg"
+                  onClick={(e) => e.stopPropagation()}
+                />
+              ) : (
+                <motion.img
+                  key={item?.url}
+                  src={item?.url}
+                  alt={post.title || 'Photo'}
+                  initial={{ opacity: 0, scale: 0.96 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  exit={{ opacity: 0, scale: 0.96 }}
+                  transition={{ duration: 0.18 }}
+                  className="max-w-[90vw] max-h-[80vh] object-contain rounded-lg"
+                  onClick={(e) => e.stopPropagation()}
+                />
+              )}
+            </AnimatePresence>
+          )}
+
+          {/* ─── Bottom bar – plain orange text link ─── */}
+          <div
+            className="absolute bottom-6 left-1/2 -translate-x-1/2 z-30 flex items-center gap-3 max-w-[90vw]"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {post.title && (
+              <span className="text-white/70 text-xs font-medium truncate max-w-[40vw]">{post.title}</span>
+            )}
+            <motion.button
+              onClick={() => navigate(`/posts/${post._id}`)}
+              whileHover={{ scale: 1.02 }}
+              whileTap={{ scale: 0.98 }}
+              className="flex items-center gap-1.5 text-amber-400 font-bold text-sm hover:underline transition"
+            >
+              <FiExternalLink size={13} strokeWidth={2.5} /> View post
+            </motion.button>
+          </div>
+        </motion.div>
+      )}
+    </AnimatePresence>,
+    document.body
   )
 }
 
@@ -781,7 +879,6 @@ export default function FeedPage() {
   const [downloadingMap, setDownloadingMap] = useState({})
   const [scrolled, setScrolled] = useState(false)
   const [lightboxPost, setLightboxPost] = useState(null)
-  const [lightboxIndex, setLightboxIndex] = useState(0)
   const lastTapRef = useRef({})
   const navigate = useNavigate()
   const { user } = useAuthStore()
@@ -818,7 +915,6 @@ export default function FeedPage() {
   }
 
   const openLightbox = (post) => {
-    setLightboxIndex(0)
     setLightboxPost(post)
   }
 
@@ -840,8 +936,6 @@ export default function FeedPage() {
       }
     }
   }
-
-  const openCommentsGrid = (e, postId) => { e.stopPropagation(); setActiveCommentPostId(postId) }
 
   const goToProfile = (e, author) => {
     e?.stopPropagation()
@@ -931,8 +1025,6 @@ export default function FeedPage() {
 
   const renderGridTile = (post) => {
     const mediaItems = getMediaItems(post)
-    const isLiked = post.likes?.includes(user?._id)
-    const commentCount = gridCommentCounts[post._id] ?? (post.commentCount ?? 0)
     return (
       <motion.div
         key={post._id}
@@ -970,20 +1062,6 @@ export default function FeedPage() {
         </div>
 
         <HeartAnimation postId={post._id} />
-
-        <div className="absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t from-black/45 to-transparent pointer-events-none" />
-        <div className="absolute bottom-1 right-1 flex items-center gap-0.5 z-10">
-          <motion.button onClick={e => { e.stopPropagation(); handleLike(e, post._id) }} whileTap={{ scale: 0.9 }}
-            className="flex items-center gap-0.5 h-6 px-1.5 text-white rounded-full leading-none">
-            {isLiked ? <FaHeart size={11} color="#ef4444" /> : <FiHeart size={11} strokeWidth={2.8} className="drop-shadow" />}
-            <span className="text-[10px] font-bold drop-shadow leading-none">{post.likes?.length || 0}</span>
-          </motion.button>
-          <motion.button onClick={e => openCommentsGrid(e, post._id)} whileTap={{ scale: 0.9 }}
-            className="flex items-center gap-0.5 h-6 px-1.5 text-white rounded-full leading-none">
-            <FiMessageCircle size={11} strokeWidth={2.8} className="drop-shadow" />
-            <span className="text-[10px] font-bold drop-shadow leading-none">{commentCount}</span>
-          </motion.button>
-        </div>
       </motion.div>
     )
   }
@@ -1150,8 +1228,6 @@ export default function FeedPage() {
 
       <PhotoLightbox
         post={lightboxPost}
-        index={lightboxIndex}
-        setIndex={setLightboxIndex}
         onClose={() => setLightboxPost(null)}
         navigate={navigate}
       />

@@ -9,8 +9,8 @@ import { postsAPI, uploadAPI, uploadMediaDirect } from '../api'
 import toast from 'react-hot-toast'
 
 const MAX_MEDIA = 5
-const MAX_DIMENSION = 1600
-const JPEG_QUALITY = 0.82
+const MAX_DIMENSION = 2048
+const JPEG_QUALITY = 0.92
 const MAX_IMAGE_SIZE = 10 * 1024 * 1024
 const MAX_VIDEO_SIZE = 100 * 1024 * 1024
 const SIGNATURE_TTL = 8 * 60 * 1000
@@ -23,6 +23,12 @@ const nextId = () => `media_${Date.now()}_${idSeq++}`
 function compressImage(file) {
   return new Promise((resolve) => {
     if (!file.type.startsWith('image/')) return resolve(file)
+    // Captures from our own in-app camera are already sized and encoded
+    // once in capturePhoto() at full quality. Running them through a
+    // second lossy resize/re-encode pass here was the main cause of soft,
+    // muddy in-app photos — so skip this step for anything we captured
+    // ourselves and only compress gallery-picked files.
+    if (file.name.startsWith('capture_')) return resolve(file)
     const img = new window.Image()
     const url = URL.createObjectURL(file)
     img.onload = () => {
@@ -192,14 +198,26 @@ export default function CreatePostPage() {
   }, [])
 
   /* camera — photos only. Video is handed off to the OS camera app so this
-     page never holds the hardware for longer than a live photo preview. */
+     page never holds the hardware for longer than a live photo preview.
+
+     Resolution: we explicitly request a high `ideal` width/height instead
+     of letting getUserMedia fall back to its own (often 640x480 or
+     1280x720) default. Without this, the sensor stream itself is
+     low-res and no amount of downstream JPEG quality tuning can recover
+     detail that was never captured. `ideal` (not `min`/exact) so it still
+     degrades gracefully on weaker devices instead of failing outright. */
   const startCamera = useCallback(async () => {
     try {
       streamRef.current?.getTracks().forEach((t) => t.stop())
       let stream
       try {
         stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: facing }, audio: false,
+          video: {
+            facingMode: facing,
+            width: { ideal: 1920 },
+            height: { ideal: 1920 },
+          },
+          audio: false,
         })
       } catch {
         stream = await navigator.mediaDevices.getUserMedia({
@@ -331,7 +349,7 @@ export default function CreatePostPage() {
       canvas.toBlob((blob) => {
         if (!blob) return
         handleFiles([new File([blob], `capture_${Date.now()}.jpg`, { type: 'image/jpeg' })])
-      }, 'image/jpeg', 0.9)
+      }, 'image/jpeg', 0.95)
     }
 
     if (flashOn && !torchSupported) {

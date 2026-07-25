@@ -85,7 +85,7 @@ export default function UserProfilePage() {
 
   if (loading || isLoading) {
     return (
-      <div className="flex justify-center items-center min-h-screen" style={{ background: 'var(--bg-primary)' }}>
+      <div className="flex justify-center items-center min-h-dvh" style={{ background: 'var(--bg-primary)' }}>
         <motion.div
           animate={{ rotate: 360 }}
           transition={{ repeat: Infinity, duration: 0.8, ease: 'linear' }}
@@ -101,12 +101,19 @@ export default function UserProfilePage() {
   ]
 
   return (
-    <div className="min-h-screen pb-20 fade-in" style={{ background: 'var(--bg-primary)' }}>
+    <div className="min-h-dvh pb-20 fade-in" style={{ background: 'var(--bg-primary)' }}>
       <div className="max-w-3xl lg:max-w-5xl mx-auto px-5 pt-6">
 
         {/* Top bar */}
         <div className="flex items-center justify-between mb-10">
-          <motion.button whileHover={{ x: -2 }} whileTap={{ scale: 0.9 }} onClick={() => navigate(-1)} style={{ color: 'var(--text-primary)' }}>
+          <motion.button
+            whileHover={{ x: -2 }}
+            whileTap={{ scale: 0.9 }}
+            onClick={() => navigate(-1)}
+            aria-label="Go back"
+            className="p-2 -ml-2 rounded-full hover:bg-black/5 dark:hover:bg-white/10 transition-colors"
+            style={{ color: 'var(--text-primary)' }}
+          >
             <FiArrowLeft size={20} />
           </motion.button>
         </div>
@@ -173,7 +180,8 @@ export default function UserProfilePage() {
               initial="hidden"
               animate="show"
               variants={{ hidden: {}, show: { transition: { staggerChildren: 0.03 } } }}
-              className="grid grid-cols-3 sm:grid-cols-4 gap-1.5"
+              className="grid grid-cols-3 gap-px"
+              style={{ background: 'var(--border)' }}
             >
               <AnimatePresence>
                 {userPosts.map(post => {
@@ -196,10 +204,10 @@ export default function UserProfilePage() {
                       layout
                       variants={{ hidden: { opacity: 0, scale: 0.9 }, show: { opacity: 1, scale: 1 } }}
                       exit={{ opacity: 0, scale: 0.85 }}
-                      whileHover={{ scale: 1.03 }}
+                      whileHover={{ scale: 1.03, zIndex: 1 }}
                       transition={{ type: 'spring', stiffness: 300, damping: 24 }}
                       onClick={() => navigate(`/posts/${post._id || post.id}`)}
-                      className="cursor-pointer rounded-lg overflow-hidden group relative"
+                      className="cursor-pointer overflow-hidden group relative"
                       style={{ aspectRatio: '1/1', background: 'var(--bg-secondary)' }}
                     >
                       {/* Multiple media badge (only for images) */}

@@ -338,14 +338,32 @@ export default function CreatePostPage() {
     setActiveId((prev) => prev || firstNewId)
   }, [remainingSlots, mediaItems.length, getCachedSignature])
 
+  /* Front camera ("selfie") capture must match what's on screen. The live
+     preview is mirrored with CSS (scaleX(-1)) so it behaves like a real
+     mirror while framing a shot — but that's purely a visual flip on the
+     <video> element, it doesn't touch the underlying frames. If we draw
+     those raw frames straight to canvas, the saved photo comes out
+     un-mirrored: left/right ends up swapped compared to what you just saw
+     and posed for. Snapchat (and every other selfie camera) avoids this by
+     saving the mirrored version, not the raw sensor frame — so here we flip
+     the canvas horizontally before drawing whenever we're on the front
+     camera, to match. The rear camera is never mirrored, on screen or in
+     the saved photo. */
   const capturePhoto = () => {
     const video = videoRef.current
     if (!video || !cameraReady || !video.videoWidth) return
 
     const doCapture = () => {
       const canvas = canvasRef.current
+      const ctx = canvas.getContext('2d')
       canvas.width = video.videoWidth; canvas.height = video.videoHeight
-      canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height)
+      ctx.setTransform(1, 0, 0, 1, 0, 0)
+      if (facing === 'user') {
+        ctx.translate(canvas.width, 0)
+        ctx.scale(-1, 1)
+      }
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
+      ctx.setTransform(1, 0, 0, 1, 0, 0)
       canvas.toBlob((blob) => {
         if (!blob) return
         handleFiles([new File([blob], `capture_${Date.now()}.jpg`, { type: 'image/jpeg' })])
@@ -525,10 +543,6 @@ export default function CreatePostPage() {
               </p>
             </div>
           )}
-
-          {/* subtle vignette */}
-          <div className="absolute inset-0 pointer-events-none"
-            style={{ background: 'radial-gradient(ellipse at center, transparent 55%, rgba(0,0,0,0.55) 100%)' }} />
 
           {/* Real flash: full-white, held a beat — this is the actual light
               source on devices with no hardware torch (see capturePhoto). */}

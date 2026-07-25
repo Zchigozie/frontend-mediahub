@@ -716,7 +716,7 @@ function PostListItem({
       className="group relative"
       style={{
         borderBottom: '1px solid var(--border)',
-        paddingBottom: '1.25rem',
+        paddingBottom: '2.5rem',
       }}
     >
       {mediaItems.length > 0 && (
@@ -1184,7 +1184,7 @@ export default function FeedPage() {
                     </motion.div>
                   ) : (
                     <motion.div
-                      className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5"
+                      className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-x-8 gap-y-10"
                       variants={gridContainer} initial="initial" animate="animate"
                     >
                       {group.posts.map((post) => (

@@ -713,11 +713,10 @@ function PostListItem({
     <motion.article
       layoutId={`post-${post._id}`}
       variants={gridItem}
-      className="group relative rounded-3xl overflow-hidden transition-all hover:-translate-y-0.5 hover:shadow-2xl"
+      className="group relative"
       style={{
-        background: 'var(--bg-secondary)',
-        border: '1px solid var(--border)',
-        boxShadow: '0 4px 24px -12px rgba(0,0,0,0.15)'
+        borderBottom: '1px solid var(--border)',
+        paddingBottom: '1.25rem',
       }}
     >
       {mediaItems.length > 0 && (

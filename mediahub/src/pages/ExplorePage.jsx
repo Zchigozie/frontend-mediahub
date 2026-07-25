@@ -373,27 +373,17 @@ export default function ExplorePage() {
                           {post.title || post.caption}
                         </p>
                       )}
-                      <div className="flex items-center gap-1.5">
-                        <div
-                          onClick={(e) => goToProfile(e, post.author)}
-                          className="cursor-pointer flex items-center gap-1.5 min-w-0 hover:opacity-70 transition-opacity"
+                      <div
+                        onClick={(e) => goToProfile(e, post.author)}
+                        className="flex items-center gap-1.5 min-w-0 cursor-pointer hover:opacity-70 transition-opacity"
+                      >
+                        <Avatar src={post.author?.avatar} name={post.author?.name} size={20} />
+                        <span
+                          className="text-[11px] font-medium truncate"
+                          style={{ color: 'var(--text-muted)' }}
                         >
-                          <Avatar src={post.author?.avatar} name={post.author?.name} size={20} />
-                          <span
-                            className="text-[11px] font-medium truncate"
-                            style={{ color: 'var(--text-muted)' }}
-                          >
-                            {post.author?.name || 'Unknown'}
-                          </span>
-                        </div>
-                        {post.likes && post.likes.length > 0 && (
-                          <span
-                            className="text-[11px] ml-auto font-medium flex-shrink-0"
-                            style={{ color: 'var(--text-muted)' }}
-                          >
-                            ♥ {post.likes.length}
-                          </span>
-                        )}
+                          {post.author?.name || 'Unknown'}
+                        </span>
                       </div>
                     </div>
                   </motion.div>

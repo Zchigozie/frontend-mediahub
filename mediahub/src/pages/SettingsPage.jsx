@@ -1,4 +1,4 @@
-import { useState, useId } from 'react'
+import { useState, useEffect, useId } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
@@ -27,7 +27,8 @@ function Row({ icon: Icon, label, onClick, danger = false, trailing }) {
     <button
       type="button"
       onClick={onClick}
-      className="w-full flex items-center gap-4 px-5 py-3.5 transition-colors hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+      className="w-full flex items-center gap-4 px-5 py-4 rounded-2xl transition-colors hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+      style={{ background: 'var(--bg-secondary)' }}
     >
       <Icon
         size={20}
@@ -49,13 +50,7 @@ function Row({ icon: Icon, label, onClick, danger = false, trailing }) {
 
 function Group({ children }) {
   return (
-    <div
-      className="mx-4 rounded-2xl overflow-hidden divide-y"
-      style={{
-        background: 'var(--bg-primary)',
-        borderColor: 'var(--border)',
-      }}
-    >
+    <div className="mx-4 flex flex-col gap-2.5">
       {children}
     </div>
   )
@@ -218,6 +213,37 @@ export default function SettingsPage() {
   const [savingPassword, setSavingPassword] = useState(false)
 
   const [deleting, setDeleting] = useState(false)
+
+  // Hide the app's persistent bottom nav while any settings sheet is open.
+  // The sheet renders at a very high z-index, but if the bottom nav is its
+  // own fixed-position component elsewhere in the tree — possibly with its
+  // own z-index — stacking order alone isn't guaranteed to put the sheet on
+  // top of it. Same approach as the post composer: toggle a body class and
+  // inject a rule that targets common bottom-nav markup conventions while
+  // any sheet is open. If your nav still shows through, add its real
+  // class/id to the selector list below.
+  useEffect(() => {
+    if (!openSheet) return
+    const style = document.createElement('style')
+    style.setAttribute('data-settings-sheet-hide-nav', 'true')
+    style.textContent = `
+      body.settings-sheet-open nav,
+      body.settings-sheet-open [class*="bottom-nav" i],
+      body.settings-sheet-open [class*="bottomnav" i],
+      body.settings-sheet-open [class*="tab-bar" i],
+      body.settings-sheet-open [class*="tabbar" i],
+      body.settings-sheet-open [id*="bottom-nav" i],
+      body.settings-sheet-open [data-bottom-nav] {
+        display: none !important;
+      }
+    `
+    document.head.appendChild(style)
+    document.body.classList.add('settings-sheet-open')
+    return () => {
+      document.body.classList.remove('settings-sheet-open')
+      style.remove()
+    }
+  }, [openSheet])
 
   const handleSaveProfile = async (e) => {
     e.preventDefault()

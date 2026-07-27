@@ -2,7 +2,7 @@ import { useState, useEffect, useId } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
-  FiArrowLeft, FiUser, FiMoon, FiLock, FiTrash2,
+  FiArrowLeft, FiUser, FiSun, FiMoon, FiMonitor, FiLock, FiTrash2,
   FiLogOut, FiChevronRight, FiX, FiEye, FiEyeOff, FiCheck, FiShield
 } from 'react-icons/fi'
 import { useAuthStore, useThemeStore } from '../store'
@@ -48,10 +48,70 @@ function Row({ icon: Icon, label, onClick, danger = false, trailing }) {
   )
 }
 
+// Non-button variant of the row shell, since this one wraps a segmented
+// control (which has its own buttons inside it) rather than being a
+// button itself — nesting <button> inside <button> is invalid HTML and
+// was silently breaking click targets on the individual segments.
+function StaticRow({ icon: Icon, label, children }) {
+  return (
+    <div
+      className="w-full flex items-center gap-4 px-5 py-4 rounded-2xl"
+      style={{ background: 'var(--bg-secondary)' }}
+    >
+      <Icon size={20} strokeWidth={1.75} style={{ color: 'var(--text-primary)' }} />
+      <span className="flex-1 text-left text-[15px] font-medium" style={{ color: 'var(--text-primary)' }}>
+        {label}
+      </span>
+      {children}
+    </div>
+  )
+}
+
 function Group({ children }) {
   return (
     <div className="mx-4 flex flex-col gap-2.5">
       {children}
+    </div>
+  )
+}
+
+/* ---------- Appearance segmented control ---------- */
+
+const APPEARANCE_OPTIONS = [
+  { value: 'light', label: 'Light', icon: FiSun },
+  { value: 'dark', label: 'Dark', icon: FiMoon },
+  { value: 'system', label: 'System', icon: FiMonitor },
+]
+
+function AppearanceControl({ value, onChange }) {
+  return (
+    <div
+      role="radiogroup"
+      aria-label="Appearance"
+      className="flex items-center gap-0.5 rounded-full p-0.5 flex-shrink-0"
+      style={{ background: 'var(--bg-input)' }}
+    >
+      {APPEARANCE_OPTIONS.map(({ value: optionValue, label, icon: Icon }) => {
+        const selected = value === optionValue
+        return (
+          <button
+            key={optionValue}
+            type="button"
+            role="radio"
+            aria-checked={selected}
+            aria-label={label}
+            title={label}
+            onClick={() => onChange(optionValue)}
+            className="relative flex items-center justify-center w-8 h-8 rounded-full transition-colors"
+            style={{
+              background: selected ? '#f59e0b' : 'transparent',
+              color: selected ? '#fff' : 'var(--text-muted)',
+            }}
+          >
+            <Icon size={15} strokeWidth={2.25} />
+          </button>
+        )
+      })}
     </div>
   )
 }
@@ -198,8 +258,11 @@ function Sheet({ open, onClose, title, children }) {
 export default function SettingsPage() {
   const navigate = useNavigate()
   const { user, updateUser, logout } = useAuthStore()
-  const { theme, toggleTheme } = useThemeStore()
-  const isDark = theme === 'dark'
+  // `theme` is now 'light' | 'dark' | 'system' (system is the app default —
+  // see themeStore.js). setTheme sets it directly; unlike the old
+  // toggleTheme() this can't skip over 'system' since there's no cycling
+  // involved, each segment sets its own value explicitly.
+  const { theme, setTheme } = useThemeStore()
 
   const [openSheet, setOpenSheet] = useState(null) // 'account' | 'password' | 'delete'
 
@@ -325,24 +388,9 @@ export default function SettingsPage() {
           <SectionLabel>General</SectionLabel>
           <Group>
             <Row icon={FiUser} label="Account" onClick={() => setOpenSheet('account')} />
-            <Row
-              icon={FiMoon}
-              label="Dark mode"
-              onClick={toggleTheme}
-              trailing={
-                <span
-                  role="switch"
-                  aria-checked={isDark}
-                  className="relative w-11 h-6 rounded-full transition-colors flex-shrink-0"
-                  style={{ background: isDark ? '#f59e0b' : 'var(--border)' }}
-                >
-                  <span
-                    className="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all"
-                    style={{ left: isDark ? '22px' : '2px' }}
-                  />
-                </span>
-              }
-            />
+            <StaticRow icon={FiMoon} label="Appearance">
+              <AppearanceControl value={theme} onChange={setTheme} />
+            </StaticRow>
             <Row icon={FiLock} label="Password" onClick={() => setOpenSheet('password')} />
             <Row icon={FiLogOut} label="Logout" onClick={handleLogout} />
             <Row icon={FiTrash2} label="Delete account" danger onClick={() => setOpenSheet('delete')} />

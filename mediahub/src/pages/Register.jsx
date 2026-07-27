@@ -8,8 +8,9 @@ import toast from 'react-hot-toast'
 export default function RegisterPage() {
   const navigate = useNavigate()
   const setAuth = useAuthStore((s) => s.setAuth)
-  const [form, setForm] = useState({ name: '', email: '', password: '' })
+  const [form, setForm] = useState({ name: '', email: '', password: '', confirmPassword: '' })
   const [showPw, setShowPw] = useState(false)
+  const [showConfirmPw, setShowConfirmPw] = useState(false)
   const [loading, setLoading] = useState(false)
   const [errors, setErrors] = useState({})
 
@@ -26,6 +27,11 @@ export default function RegisterPage() {
     } else if (form.password.length < 6) {
       e.password = 'Password must be at least 6 characters'
     }
+    if (!form.confirmPassword) {
+      e.confirmPassword = 'Please confirm your password'
+    } else if (form.password && form.confirmPassword !== form.password) {
+      e.confirmPassword = 'Passwords do not match'
+    }
     setErrors(e)
     return Object.keys(e).length === 0
   }
@@ -35,7 +41,8 @@ export default function RegisterPage() {
     if (!validate()) return
     setLoading(true)
     try {
-      const { data } = await authAPI.register(form)
+      const { name, email, password } = form
+      const { data } = await authAPI.register({ name, email, password })
       setAuth(data.user, data.token)
       toast.success(`Welcome to MediaHub, ${data.user.name}!`)
       navigate('/')
@@ -165,6 +172,9 @@ export default function RegisterPage() {
                   onChange={(e) => {
                     setForm({ ...form, password: e.target.value })
                     if (errors.password) setErrors({ ...errors, password: '' })
+                    if (errors.confirmPassword && form.confirmPassword && e.target.value === form.confirmPassword) {
+                      setErrors((prev) => ({ ...prev, confirmPassword: '' }))
+                    }
                   }}
                   className="w-full bg-transparent text-base outline-none border-b pb-2.5 pr-9 transition-colors text-white placeholder-white/40 focus:border-amber-400"
                   style={{ borderColor: errors.password ? '#f87171' : 'rgba(255,255,255,0.3)' }}
@@ -178,6 +188,34 @@ export default function RegisterPage() {
                 </button>
               </div>
               {errors.password && <p className="text-xs text-red-300">{errors.password}</p>}
+            </div>
+
+            {/* Confirm Password */}
+            <div className="flex flex-col gap-2">
+              <label className="text-sm font-semibold text-white/85">
+                Confirm password
+              </label>
+              <div className="relative">
+                <input
+                  type={showConfirmPw ? 'text' : 'password'}
+                  placeholder="Re-enter your password"
+                  value={form.confirmPassword}
+                  onChange={(e) => {
+                    setForm({ ...form, confirmPassword: e.target.value })
+                    if (errors.confirmPassword) setErrors({ ...errors, confirmPassword: '' })
+                  }}
+                  className="w-full bg-transparent text-base outline-none border-b pb-2.5 pr-9 transition-colors text-white placeholder-white/40 focus:border-amber-400"
+                  style={{ borderColor: errors.confirmPassword ? '#f87171' : 'rgba(255,255,255,0.3)' }}
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowConfirmPw(!showConfirmPw)}
+                  className="absolute right-0 top-0 hover:opacity-70 transition-opacity text-white/60"
+                >
+                  {showConfirmPw ? <FiEyeOff size={17} /> : <FiEye size={17} />}
+                </button>
+              </div>
+              {errors.confirmPassword && <p className="text-xs text-red-300">{errors.confirmPassword}</p>}
             </div>
 
             <button

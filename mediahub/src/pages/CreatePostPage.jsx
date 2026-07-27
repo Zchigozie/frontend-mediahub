@@ -310,10 +310,8 @@ export default function CreatePostPage() {
     if (mediaItems.length === 0) getCachedSignature()
     setErrors((p) => ({ ...p, content: '' }))
 
-    let firstNewId = null
-    accepted.forEach((f, idx) => {
+    accepted.forEach((f) => {
       const id = nextId()
-      if (idx === 0) firstNewId = id
       const isVideo = f.type.startsWith('video/')
       if (isVideo) {
         // The file here is a finished recording (system camera or gallery
@@ -335,7 +333,11 @@ export default function CreatePostPage() {
         })()
       }
     })
-    setActiveId((prev) => prev || firstNewId)
+    // Deliberately NOT auto-selecting the newly captured/added item here.
+    // The viewfinder always shows the live camera; captured shots land in
+    // the thumbnail strip below so the next shot can be taken immediately.
+    // `activeId` stays whatever it was (usually null), and `activeItem`
+    // only matters once the user moves to the edit screen.
   }, [remainingSlots, mediaItems.length, getCachedSignature])
 
   /* Front camera ("selfie") capture must match what's on screen. The live
@@ -516,7 +518,9 @@ export default function CreatePostPage() {
           pointerEvents: screen === 'edit' ? 'none' : 'auto',
         }}
       >
-        {/* Viewfinder */}
+        {/* Viewfinder — always shows the live camera. Captured shots are
+            never overlaid here; they only appear in the thumbnail strip
+            below, so the feed stays clear and ready for the next shot. */}
         <div className="relative flex-1" style={{ background: '#0a0a0a' }}>
           {!cameraError && (
             <video
@@ -571,32 +575,6 @@ export default function CreatePostPage() {
             )}
           </AnimatePresence>
 
-          {/* Selected media preview overlays camera */}
-          <AnimatePresence mode="wait">
-            {activeItem && (
-              <motion.div
-                key={activeItem.id}
-                initial={{ opacity: 0, scale: 1.02 }}
-                animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0 }}
-                transition={{ duration: 0.25, ease: [0.2, 0.8, 0.2, 1] }}
-                className="absolute inset-0"
-              >
-                {activeItem.isVideo && activeItem.preview ? (
-                  <BoomerangVideo src={activeItem.preview} className="w-full h-full object-cover" />
-                ) : activeItem.preview ? (
-                  <img src={activeItem.preview} alt="" className="w-full h-full object-cover" />
-                ) : (
-                  <div className="w-full h-full flex items-center justify-center"
-                    style={{ background: 'rgba(0,0,0,0.55)', backdropFilter: 'blur(8px)' }}>
-                    <span className="h-7 w-7 rounded-full border-2 block animate-spin"
-                      style={{ borderColor: 'rgba(255,255,255,0.2)', borderTopColor: '#fff' }} />
-                  </div>
-                )}
-              </motion.div>
-            )}
-          </AnimatePresence>
-
           {/* Top header (over camera) */}
           <div className="absolute top-0 inset-x-0 z-20 flex items-center justify-between px-4"
             style={{
@@ -636,7 +614,8 @@ export default function CreatePostPage() {
 
         {/* Bottom control deck */}
         <div className="relative z-10" style={{ paddingBottom: 'max(env(safe-area-inset-bottom), 18px)' }}>
-          {/* Gallery strip */}
+          {/* Gallery strip — every captured/picked item lands here, tap to
+              mark it as the cover item for the edit screen. */}
           <div className="px-3 pb-3">
             <div className="flex items-center gap-2 overflow-x-auto no-scrollbar">
               {mediaItems.map((item) => {

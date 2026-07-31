@@ -17,6 +17,8 @@ const SIGNATURE_TTL = 8 * 60 * 1000
 const MAX_RECORD_SECONDS = 60
 const VIDEO_BITRATE = 5_000_000 // 5 Mbps — noticeably sharper than typical browser defaults
 const HOLD_THRESHOLD_MS = 300 // press-and-hold this long to start recording; shorter = photo
+const ZOOM_DRAG_RANGE_PX = 200 // vertical drag distance (px) that covers the full zoom range
+const ZOOM_DRAG_DEADZONE_PX = 6 // ignore tiny jitter before treating a press as a zoom drag
 
 let idSeq = 0
 const nextId = () => `media_${Date.now()}_${idSeq++}`
@@ -147,6 +149,12 @@ export default function CreatePostPage() {
   const isRecordingRef = useRef(false)
   const audioStreamPromiseRef = useRef(null)
   const pendingStopRef = useRef(false)
+  const zoomCapsRef = useRef(null) // { min, max, step } from the video track, or null if unsupported
+  const zoomValueRef = useRef(1)
+  const zoomRafRef = useRef(null)
+  const dragStartYRef = useRef(0)
+  const dragStartZoomRef = useRef(1)
+  const didZoomRef = useRef(false)
 
   const [screen, setScreen] = useState('capture')
   const [mediaItems, setMediaItems] = useState([])
@@ -161,6 +169,8 @@ export default function CreatePostPage() {
   const [shutterClick, setShutterClick] = useState(false)
   const [isRecording, setIsRecording] = useState(false)
   const [recordSeconds, setRecordSeconds] = useState(0)
+  const [isZooming, setIsZooming] = useState(false)
+  const [zoomDisplay, setZoomDisplay] = useState(1)
   const [content, setContent] = useState('')
   const [loading, setLoading] = useState(false)
   const [uploadProgress, setUploadProgress] = useState(0)
@@ -224,6 +234,20 @@ export default function CreatePostPage() {
     return audioStreamPromiseRef.current
   }, [])
 
+  const setZoom = useCallback((raw) => {
+    const caps = zoomCapsRef.current
+    if (!caps) return
+    const clamped = Math.min(caps.max, Math.max(caps.min, raw))
+    zoomValueRef.current = clamped
+    setZoomDisplay(clamped / caps.min)
+    const track = streamRef.current?.getVideoTracks()?.[0]
+    if (!track) return
+    if (zoomRafRef.current) cancelAnimationFrame(zoomRafRef.current)
+    zoomRafRef.current = requestAnimationFrame(() => {
+      track.applyConstraints({ advanced: [{ zoom: clamped }] }).catch(() => {})
+    })
+  }, [])
+
   const startCamera = useCallback(async () => {
     try {
       streamRef.current?.getTracks().forEach((t) => t.stop())
@@ -256,6 +280,22 @@ export default function CreatePostPage() {
         track.applyConstraints({ advanced: [{ torch: true }] }).catch((err) => {
           console.error('Torch re-apply failed after camera restart', err)
         })
+      }
+
+      // Hardware zoom range for this track (varies by camera/device — the
+      // front camera or a desktop webcam often won't report one at all).
+      // Real track-level zoom, not a CSS scale, so it affects the live
+      // preview, captured photos, and recorded video all consistently.
+      const zoomCaps = track?.getCapabilities?.().zoom
+      if (zoomCaps && zoomCaps.max > zoomCaps.min) {
+        zoomCapsRef.current = zoomCaps
+        const current = track.getSettings?.().zoom ?? zoomCaps.min
+        zoomValueRef.current = current
+        setZoomDisplay(current / zoomCaps.min)
+      } else {
+        zoomCapsRef.current = null
+        zoomValueRef.current = 1
+        setZoomDisplay(1)
       }
     } catch {
       setCameraError(true)
@@ -452,20 +492,45 @@ export default function CreatePostPage() {
     if (!cameraReady || isRecordingRef.current) return
     isHoldingRef.current = false
     pendingStopRef.current = false
+    didZoomRef.current = false
     clearTimeout(holdTimerRef.current)
     // Request mic access the moment the finger goes down, not after the
     // hold threshold — gives the permission prompt (only shown once per
     // session) the most possible time to resolve before release.
     ensureAudioStream().catch(() => {})
+
+    if (zoomCapsRef.current) {
+      e.target.setPointerCapture?.(e.pointerId)
+      dragStartYRef.current = e.clientY
+      dragStartZoomRef.current = zoomValueRef.current
+    }
+
     holdTimerRef.current = setTimeout(() => {
       isHoldingRef.current = true
       startRecording()
     }, HOLD_THRESHOLD_MS)
   }
 
+  // Drag up while holding the shutter = zoom in, drag down = zoom out —
+  // same gesture as Snapchat/Instagram. Works both before recording starts
+  // (adjust zoom, then hold to record) and while actively recording.
+  const handleShutterMove = (e) => {
+    if (!zoomCapsRef.current) return
+    const deltaY = dragStartYRef.current - e.clientY
+    if (!didZoomRef.current) {
+      if (Math.abs(deltaY) <= ZOOM_DRAG_DEADZONE_PX) return
+      didZoomRef.current = true
+      setIsZooming(true)
+    }
+    const caps = zoomCapsRef.current
+    const range = caps.max - caps.min
+    setZoom(dragStartZoomRef.current + (deltaY / ZOOM_DRAG_RANGE_PX) * range)
+  }
+
   const handleShutterUp = (e) => {
     e.preventDefault()
     clearTimeout(holdTimerRef.current)
+    setIsZooming(false)
     if (isHoldingRef.current) {
       isHoldingRef.current = false
       if (isRecordingRef.current) {
@@ -477,13 +542,14 @@ export default function CreatePostPage() {
         // forever with nothing left to stop it.
         pendingStopRef.current = true
       }
-    } else if (cameraReady && !isRecordingRef.current) {
+    } else if (cameraReady && !isRecordingRef.current && !didZoomRef.current) {
       capturePhoto()
     }
   }
 
   const handleShutterCancel = () => {
     clearTimeout(holdTimerRef.current)
+    setIsZooming(false)
     if (isHoldingRef.current) {
       isHoldingRef.current = false
       if (isRecordingRef.current) stopRecording()
@@ -761,16 +827,35 @@ export default function CreatePostPage() {
             </button>
 
             <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+              <AnimatePresence>
+                {isZooming && zoomCapsRef.current && (
+                  <motion.div
+                    initial={{ opacity: 0, y: 8, scale: 0.9 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    exit={{ opacity: 0, y: 8, scale: 0.9 }}
+                    className="absolute px-3 py-1.5 rounded-full text-xs font-bold tabular-nums"
+                    style={{
+                      bottom: 96,
+                      background: 'rgba(0,0,0,0.6)',
+                      backdropFilter: 'blur(10px)',
+                      border: '1px solid rgba(255,255,255,0.12)',
+                    }}
+                  >
+                    {zoomDisplay.toFixed(1)}×
+                  </motion.div>
+                )}
+              </AnimatePresence>
               <motion.button
                 whileTap={{ scale: isRecording ? 1 : 0.88 }}
                 animate={isRecording ? { scale: 1.12 } : { scale: 1 }}
                 onPointerDown={handleShutterDown}
+                onPointerMove={handleShutterMove}
                 onPointerUp={handleShutterUp}
                 onPointerLeave={handleShutterCancel}
                 onPointerCancel={handleShutterCancel}
                 onContextMenu={(e) => e.preventDefault()}
                 disabled={!cameraReady}
-                aria-label={isRecording ? 'Recording — release to stop' : 'Tap for photo, hold for video'}
+                aria-label={isRecording ? 'Recording — release to stop' : 'Tap for photo, hold for video, drag to zoom'}
                 className="pointer-events-auto rounded-full flex items-center justify-center disabled:opacity-40"
                 style={{
                   width: 76, height: 76,

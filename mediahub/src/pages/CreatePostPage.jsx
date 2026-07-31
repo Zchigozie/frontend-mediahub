@@ -145,6 +145,8 @@ export default function CreatePostPage() {
   const holdTimerRef = useRef(null)
   const isHoldingRef = useRef(false)
   const isRecordingRef = useRef(false)
+  const audioStreamPromiseRef = useRef(null)
+  const pendingStopRef = useRef(false)
 
   const [screen, setScreen] = useState('capture')
   const [mediaItems, setMediaItems] = useState([])
@@ -205,6 +207,21 @@ export default function CreatePostPage() {
     signatureRef.current = { promise, timestamp: now }
     promise.catch(() => { if (signatureRef.current?.promise === promise) signatureRef.current = null })
     return promise
+  }, [])
+
+  // Requests mic access at most once per session and reuses the resulting
+  // stream/promise for every subsequent recording. Called as soon as the
+  // shutter is pressed (not after the hold threshold) so the permission
+  // prompt — which can take a while for the user to respond to — has as
+  // much time as possible to resolve before they release.
+  const ensureAudioStream = useCallback(() => {
+    if (audioStreamRef.current) return Promise.resolve(audioStreamRef.current)
+    if (!audioStreamPromiseRef.current) {
+      audioStreamPromiseRef.current = navigator.mediaDevices.getUserMedia({ audio: true })
+        .then((stream) => { audioStreamRef.current = stream; return stream })
+        .catch((err) => { audioStreamPromiseRef.current = null; throw err })
+    }
+    return audioStreamPromiseRef.current
   }, [])
 
   const startCamera = useCallback(async () => {
@@ -364,12 +381,17 @@ export default function CreatePostPage() {
   const startRecording = useCallback(async () => {
     if (!streamRef.current || isRecordingRef.current || !cameraReady) return
     try {
-      if (!audioStreamRef.current) {
-        audioStreamRef.current = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const audioStream = await ensureAudioStream()
+      if (pendingStopRef.current) {
+        // User already released (e.g. while the mic permission prompt was
+        // up) before we got access — don't start a recording nobody asked
+        // for anymore, and nothing left to stop it later.
+        pendingStopRef.current = false
+        return
       }
       const combined = new MediaStream([
         ...streamRef.current.getVideoTracks(),
-        ...audioStreamRef.current.getAudioTracks(),
+        ...audioStream.getAudioTracks(),
       ])
       const mimeType = getSupportedMimeType()
       const recorder = new MediaRecorder(combined, {
@@ -388,6 +410,11 @@ export default function CreatePostPage() {
       isRecordingRef.current = true
       setIsRecording(true)
       setRecordSeconds(0)
+      if (pendingStopRef.current) {
+        pendingStopRef.current = false
+        stopRecording()
+        return
+      }
       recordTimerRef.current = setInterval(() => {
         setRecordSeconds((s) => {
           if (s + 1 >= MAX_RECORD_SECONDS) {
@@ -424,7 +451,12 @@ export default function CreatePostPage() {
     e.preventDefault()
     if (!cameraReady || isRecordingRef.current) return
     isHoldingRef.current = false
+    pendingStopRef.current = false
     clearTimeout(holdTimerRef.current)
+    // Request mic access the moment the finger goes down, not after the
+    // hold threshold — gives the permission prompt (only shown once per
+    // session) the most possible time to resolve before release.
+    ensureAudioStream().catch(() => {})
     holdTimerRef.current = setTimeout(() => {
       isHoldingRef.current = true
       startRecording()
@@ -436,7 +468,15 @@ export default function CreatePostPage() {
     clearTimeout(holdTimerRef.current)
     if (isHoldingRef.current) {
       isHoldingRef.current = false
-      stopRecording()
+      if (isRecordingRef.current) {
+        stopRecording()
+      } else {
+        // Held past the threshold but startRecording is still awaiting mic
+        // access (e.g. the permission prompt is still up) — flag it to
+        // stop itself the instant it finishes instead of recording
+        // forever with nothing left to stop it.
+        pendingStopRef.current = true
+      }
     } else if (cameraReady && !isRecordingRef.current) {
       capturePhoto()
     }
@@ -446,7 +486,8 @@ export default function CreatePostPage() {
     clearTimeout(holdTimerRef.current)
     if (isHoldingRef.current) {
       isHoldingRef.current = false
-      stopRecording()
+      if (isRecordingRef.current) stopRecording()
+      else pendingStopRef.current = true
     }
   }
 

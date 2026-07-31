@@ -184,14 +184,49 @@ function hashStr(s) {
 
 /* ─────────── Boomerang video (muted, ping-pong) ─────────── */
 
-function BoomerangVideo({ src, poster, className, style, onClick }) {
+// `isActive`: true when this is the slide currently showing inside a
+// multi-media post's MediaSlider (always true for single-media posts).
+// The component also tracks real viewport visibility itself, the same way
+// FeedVideo does below. Both gates must be true before anything plays.
+//
+// Previously this autoplayed — and kept running its own requestAnimationFrame
+// reverse-playback loop — the instant it mounted, regardless of whether it
+// was on screen or the active slide in its post's slider. With several
+// video posts in the feed (or several videos inside one post), that meant
+// many videos decoding and many rAF loops running simultaneously, which is
+// exactly what made dragging through a slider and scrolling the feed feel
+// slow. Now a tile only animates while it's both visible and active.
+function BoomerangVideo({ src, poster, className, style, onClick, isActive = true }) {
   const videoRef = useRef(null)
+  const wrapRef = useRef(null)
   const rafRef = useRef(null)
   const lastTimeRef = useRef(null)
+  const [inView, setInView] = useState(false)
+
+  useEffect(() => {
+    const el = wrapRef.current
+    if (!el) return
+    const io = new IntersectionObserver(
+      ([entry]) => setInView(entry.isIntersecting),
+      { threshold: 0.15 }
+    )
+    io.observe(el)
+    return () => io.disconnect()
+  }, [])
+
+  const shouldPlay = isActive && inView
 
   useEffect(() => {
     const video = videoRef.current
     if (!video || !src) return
+
+    if (!shouldPlay) {
+      video.pause()
+      if (rafRef.current) cancelAnimationFrame(rafRef.current)
+      lastTimeRef.current = null
+      return
+    }
+
     let cancelled = false
 
     const stepReverse = (timestamp) => {
@@ -219,6 +254,7 @@ function BoomerangVideo({ src, poster, className, style, onClick }) {
     }
 
     video.addEventListener('ended', handleEnded)
+    video.currentTime = 0
     video.play().catch(() => { })
 
     return () => {
@@ -226,22 +262,24 @@ function BoomerangVideo({ src, poster, className, style, onClick }) {
       video.removeEventListener('ended', handleEnded)
       if (rafRef.current) cancelAnimationFrame(rafRef.current)
     }
-  }, [src])
+  }, [src, shouldPlay])
 
   return (
-    <video
-      ref={videoRef}
-      src={src}
-      poster={poster || undefined}
-      className={className}
-      style={style}
-      muted
-      playsInline
-      autoPlay
-      loop={false}
-      onClick={onClick}
-      onError={(e) => { e.target.style.display = 'none' }}
-    />
+    <div ref={wrapRef} className="w-full h-full">
+      <video
+        ref={videoRef}
+        src={src}
+        poster={poster || undefined}
+        className={className}
+        style={style}
+        muted
+        playsInline
+        loop={false}
+        preload={shouldPlay ? 'auto' : 'metadata'}
+        onClick={onClick}
+        onError={(e) => { e.target.style.display = 'none' }}
+      />
+    </div>
   )
 }
 
@@ -457,14 +495,19 @@ function PhotoLightbox({ post, onClose, navigate }) {
 
 /* ─────────── List video (SOUND enabled, one-at-a-time) ─────────── */
 
-function FeedVideo({ src, poster, postId, className, style }) {
+// `isActive`: true when this is the slide currently showing inside a
+// multi-media post's MediaSlider (always true for single-media posts).
+// Playback now requires both `inView` (existing viewport check) AND
+// `isActive`, so a post with several videos doesn't play all of them at
+// once — only the one you're actually looking at.
+function FeedVideo({ src, poster, postId, className, style, isActive = true }) {
   const videoRef = useRef(null)
   const wrapRef = useRef(null)
   const [muted, setMuted] = useState(true)
   const [inView, setInView] = useState(false)
   const [needsTap, setNeedsTap] = useState(false)
 
-  const isActive = SoundBus.getActive() === postId
+  const isActiveSound = SoundBus.getActive() === postId
 
   useEffect(() => {
     return SoundBus.subscribe((activeId) => {
@@ -491,13 +534,13 @@ function FeedVideo({ src, poster, postId, className, style }) {
   useEffect(() => {
     const v = videoRef.current
     if (!v) return
-    if (inView) {
+    if (inView && isActive) {
       v.play().catch(() => { })
     } else {
       v.pause()
       if (SoundBus.getActive() === postId) SoundBus.setActive(null)
     }
-  }, [inView, postId])
+  }, [inView, isActive, postId])
 
   const toggleSound = (e) => {
     e.stopPropagation()
@@ -531,7 +574,7 @@ function FeedVideo({ src, poster, postId, className, style }) {
         muted
         playsInline
         loop
-        autoPlay
+        preload={isActive ? 'auto' : 'metadata'}
       />
 
       <button
@@ -553,7 +596,7 @@ function FeedVideo({ src, poster, postId, className, style }) {
         </button>
       )}
 
-      {isActive && !muted && (
+      {isActiveSound && !muted && (
         <span className="absolute top-3 left-3 z-10 text-[10px] tracking-widest uppercase font-bold px-2 py-1 rounded-full bg-amber-500 text-white shadow">
           Live sound
         </span>
@@ -732,12 +775,13 @@ function PostListItem({
             hideDots
             tapToNavigate
             fit="cover"
-            renderVideo={(item) => (
+            renderVideo={(item, isActive) => (
               <FeedVideo
                 src={item.url}
                 poster={item.thumbnail}
                 postId={post._id}
                 className="w-full h-full"
+                isActive={isActive}
               />
             )}
           />
@@ -1044,8 +1088,8 @@ export default function FeedPage() {
             className="w-full h-full"
             hideDots
             peek
-            renderVideo={(item) => (
-              <BoomerangVideo src={item.url} poster={item.thumbnail} className="w-full h-full object-cover" />
+            renderVideo={(item, isActive) => (
+              <BoomerangVideo src={item.url} poster={item.thumbnail} className="w-full h-full object-cover" isActive={isActive} />
             )}
           />
         ) : (

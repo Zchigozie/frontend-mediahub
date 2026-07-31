@@ -108,23 +108,51 @@ export function useMediaAspect(items, { min = 4 / 5, max = 1.91, fallback = 1 } 
   return ratio
 }
 
-// ── NEW: Instagram-style video — always autoplaying, muted, looping, no
-// native browser controls (so no "paused" chrome flashes on refresh), tap
-// toggles play/pause, small mute toggle bottom-right.
-export function InstagramVideo({ src, poster, className, style }) {
+// ── Instagram-style video — autoplaying, muted, looping, no native browser
+// controls (so no "paused" chrome flashes on refresh), tap toggles
+// play/pause, small mute toggle bottom-right.
+//
+// `isActive` (passed down from MediaSlider when this is one slide among
+// several) AND real viewport visibility both gate playback now. Previously
+// this played on mount unconditionally, which meant every video inside a
+// multi-media post's slider started decoding and playing at once — not just
+// the one slide actually on screen. With several video posts in a feed that
+// adds up fast and was the main cause of stuttery dragging/scrolling.
+export function InstagramVideo({ src, poster, className, style, isActive = true }) {
   const videoRef = useRef(null)
+  const wrapRef = useRef(null)
   const [muted, setMuted] = useState(true)
   const [paused, setPaused] = useState(false)
+  const [inView, setInView] = useState(false)
+
+  useEffect(() => {
+    const el = wrapRef.current
+    if (!el) return
+    const io = new IntersectionObserver(
+      ([entry]) => setInView(entry.isIntersecting),
+      { threshold: 0.2 }
+    )
+    io.observe(el)
+    return () => io.disconnect()
+  }, [])
+
+  const shouldPlay = isActive && inView
 
   useEffect(() => {
     const v = videoRef.current
     if (!v) return
-    const tryPlay = () => v.play().catch(() => {})
-    tryPlay()
-    const onVisible = () => { if (document.visibilityState === 'visible') tryPlay() }
+    if (shouldPlay) {
+      v.play().catch(() => {})
+    } else {
+      v.pause()
+    }
+  }, [shouldPlay, src])
+
+  useEffect(() => {
+    const onVisible = () => { if (document.visibilityState === 'visible' && shouldPlay) videoRef.current?.play().catch(() => {}) }
     document.addEventListener('visibilitychange', onVisible)
     return () => document.removeEventListener('visibilitychange', onVisible)
-  }, [src])
+  }, [shouldPlay])
 
   const togglePlay = (e) => {
     e.stopPropagation()
@@ -135,7 +163,7 @@ export function InstagramVideo({ src, poster, className, style }) {
   }
 
   return (
-    <div className="relative w-full h-full" onClick={togglePlay}>
+    <div ref={wrapRef} className="relative w-full h-full" onClick={togglePlay}>
       <video
         ref={videoRef}
         src={src}
@@ -145,7 +173,7 @@ export function InstagramVideo({ src, poster, className, style }) {
         muted={muted}
         loop
         playsInline
-        autoPlay
+        preload={shouldPlay ? 'auto' : 'metadata'}
         onPlay={() => setPaused(false)}
         onPause={() => setPaused(true)}
         onError={(e) => { e.target.style.display = 'none' }}
@@ -183,7 +211,7 @@ export function ImageSlider({ urls, title, postId, onDoubleTap, rounded = 'round
 export function MediaSlider({
   items, title, postId, onDoubleTap, rounded = 'rounded-2xl', className = '',
   showCounter = true, hideDots = false, peek = false, tapToNavigate = true,
-  renderVideo, fit = 'cover', // ← NEW: 'cover' (default, unchanged for grid) or 'contain' (full media visible)
+  renderVideo, fit = 'cover', // ← 'cover' (default, unchanged for grid) or 'contain' (full media visible)
 }) {
   const [index, setIndex] = useState(0)
   const containerRef = useRef(null)
@@ -197,7 +225,7 @@ export function MediaSlider({
     item.type === 'video'
       ? (renderVideo
           ? renderVideo(item, isActive)
-          : <InstagramVideo src={item.url} poster={item.thumbnail} className={`w-full h-full ${fitClass}`} />)
+          : <InstagramVideo src={item.url} poster={item.thumbnail} className={`w-full h-full ${fitClass}`} isActive={isActive} />)
       : (
         <img
           src={item.url}
@@ -280,7 +308,11 @@ export function MediaSlider({
       >
         <motion.div
           className="flex h-full"
-          style={{ width: `${items.length * 100}%` }}
+          // will-change hints the browser to promote this to its own GPU
+          // compositor layer up front, instead of deciding mid-drag — that
+          // "deciding" moment was part of what made the first swipe of a
+          // session feel janky compared to the second.
+          style={{ width: `${items.length * 100}%`, willChange: 'transform' }}
           drag="x"
           dragConstraints={containerRef}
           dragElastic={0.06}
@@ -291,11 +323,9 @@ export function MediaSlider({
         >
           {items.map((item, i) => {
             const isActive = i === index
-            // FIX: only the active slide should be interactive, and only when
+            // Only the active slide should be interactive, and only when
             // it's a video (so its play/pause + mute controls can receive
-            // taps). Every slide being pointer-events-none was why video
-            // playback controls never worked once there was more than one
-            // media item on a post.
+            // taps).
             const interactive = item.type === 'video' && isActive
             return (
               <div

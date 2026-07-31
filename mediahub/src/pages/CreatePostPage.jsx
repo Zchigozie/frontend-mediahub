@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   FiX, FiZap, FiImage, FiCheck, FiArrowLeft,
-  FiPlay, FiRotateCw, FiCamera, FiVideo,
+  FiPlay, FiRotateCw, FiCamera, FiVideo, FiSquare,
 } from 'react-icons/fi'
 import { postsAPI, uploadAPI, uploadMediaDirect } from '../api'
 import toast from 'react-hot-toast'
@@ -14,6 +14,8 @@ const JPEG_QUALITY = 0.92
 const MAX_IMAGE_SIZE = 10 * 1024 * 1024
 const MAX_VIDEO_SIZE = 100 * 1024 * 1024
 const SIGNATURE_TTL = 8 * 60 * 1000
+const MAX_RECORD_SECONDS = 60
+const VIDEO_BITRATE = 5_000_000 // 5 Mbps — noticeably sharper than typical browser defaults
 
 let idSeq = 0
 const nextId = () => `media_${Date.now()}_${idSeq++}`
@@ -56,12 +58,29 @@ function compressImage(file) {
   })
 }
 
-// Video previews: unlike the old in-page MediaRecorder flow, videos now
-// always arrive as a finished file handed back from the OS camera/gallery —
-// never an in-progress recording — so it's safe to preview them client-side
-// via a plain object URL. We render them the same boomerang (forward, then
-// reverse) way the main feed grid does, so the composer and feed look and
-// feel consistent.
+// Picks the best video container/codec this browser actually supports for
+// MediaRecorder. Order matters: prefer mp4/h264 where available (iOS Safari
+// 17+, some Android/Chrome versions) since it's universally playable;
+// fall back to webm/vp9 then webm/vp8 for everyone else.
+function getSupportedMimeType() {
+  const candidates = [
+    'video/mp4;codecs=avc1,mp4a.40.2',
+    'video/mp4',
+    'video/webm;codecs=vp9,opus',
+    'video/webm;codecs=vp8,opus',
+    'video/webm',
+  ]
+  for (const type of candidates) {
+    if (window.MediaRecorder?.isTypeSupported?.(type)) return type
+  }
+  return ''
+}
+
+// Video previews: files are either a freshly-recorded in-app clip or a
+// gallery pick — either way they're a finished file, so a plain object URL
+// is safe and instant to preview. Rendered the same boomerang (forward,
+// then reverse) way the main feed grid does, so the composer and feed look
+// and feel consistent.
 function BoomerangVideo({ src, className, style }) {
   const videoRef = useRef(null)
   const rafRef = useRef(null)
@@ -126,10 +145,13 @@ function BoomerangVideo({ src, className, style }) {
 export default function CreatePostPage() {
   const navigate = useNavigate()
   const fileRef = useRef(null)
-  const videoFileRef = useRef(null)
   const videoRef = useRef(null)
   const canvasRef = useRef(null)
   const streamRef = useRef(null)
+  const audioStreamRef = useRef(null)
+  const mediaRecorderRef = useRef(null)
+  const recordedChunksRef = useRef([])
+  const recordTimerRef = useRef(null)
   const abortControllerRef = useRef(null)
   const signatureRef = useRef(null)
   const videoUrlsRef = useRef(new Set())
@@ -137,6 +159,7 @@ export default function CreatePostPage() {
   const [screen, setScreen] = useState('capture')
   const [mediaItems, setMediaItems] = useState([])
   const [activeId, setActiveId] = useState(null)
+  const [previewId, setPreviewId] = useState(null)
   const [cameraReady, setCameraReady] = useState(false)
   const [cameraError, setCameraError] = useState(false)
   const [facing, setFacing] = useState('environment')
@@ -144,6 +167,8 @@ export default function CreatePostPage() {
   const [torchSupported, setTorchSupported] = useState(false)
   const [flashPulse, setFlashPulse] = useState(false)
   const [shutterClick, setShutterClick] = useState(false)
+  const [isRecording, setIsRecording] = useState(false)
+  const [recordSeconds, setRecordSeconds] = useState(0)
   const [content, setContent] = useState('')
   const [loading, setLoading] = useState(false)
   const [uploadProgress, setUploadProgress] = useState(0)
@@ -156,6 +181,8 @@ export default function CreatePostPage() {
     () => mediaItems.find((i) => i.id === activeId) || mediaItems[0] || null,
     [mediaItems, activeId]
   )
+  const previewIndex = mediaItems.findIndex((i) => i.id === previewId)
+  const previewItem = previewIndex >= 0 ? mediaItems[previewIndex] : null
 
   // Hide the app's persistent bottom nav while this full-screen composer is
   // mounted. This page renders as a `fixed inset-0` overlay, but the bottom
@@ -197,15 +224,19 @@ export default function CreatePostPage() {
     return promise
   }, [])
 
-  /* camera — photos only. Video is handed off to the OS camera app so this
-     page never holds the hardware for longer than a live photo preview.
+  /* camera — handles both photo capture and in-app video recording, so it
+     stays open the whole time this screen is mounted; we never hand off to
+     the OS camera app anymore.
 
-     Resolution: we explicitly request a high `ideal` width/height instead
-     of letting getUserMedia fall back to its own (often 640x480 or
-     1280x720) default. Without this, the sensor stream itself is
-     low-res and no amount of downstream JPEG quality tuning can recover
-     detail that was never captured. `ideal` (not `min`/exact) so it still
-     degrades gracefully on weaker devices instead of failing outright. */
+     Resolution: we request a realistic 16:9 `ideal` frame (not a forced
+     square). Forcing width and height to the same "ideal" value here used
+     to make the browser pick a resolution mode cropped tightly toward 1:1
+     to satisfy both constraints — since no phone sensor is natively
+     square, that crop looked exactly like an unwanted zoom. Requesting a
+     normal widescreen frame and letting `object-cover` handle the crop for
+     display (same as any native camera app) fixes it. `ideal` (not
+     `min`/exact) so it still degrades gracefully on weaker devices instead
+     of failing outright. */
   const startCamera = useCallback(async () => {
     try {
       streamRef.current?.getTracks().forEach((t) => t.stop())
@@ -215,7 +246,7 @@ export default function CreatePostPage() {
           video: {
             facingMode: facing,
             width: { ideal: 1920 },
-            height: { ideal: 1920 },
+            height: { ideal: 1080 },
           },
           audio: false,
         })
@@ -264,6 +295,8 @@ export default function CreatePostPage() {
   useEffect(() => () => {
     abortControllerRef.current?.abort()
     videoUrlsRef.current.forEach((url) => URL.revokeObjectURL(url))
+    audioStreamRef.current?.getTracks().forEach((t) => t.stop())
+    clearInterval(recordTimerRef.current)
   }, [])
 
   const toggleFlash = async () => {
@@ -314,7 +347,7 @@ export default function CreatePostPage() {
       const id = nextId()
       const isVideo = f.type.startsWith('video/')
       if (isVideo) {
-        // The file here is a finished recording (system camera or gallery
+        // The file here is a finished clip (in-app recording or gallery
         // pick), so a plain object URL is safe and instant — no need to
         // wait on anything async the way the image compression path does.
         const url = URL.createObjectURL(f)
@@ -353,7 +386,7 @@ export default function CreatePostPage() {
      the saved photo. */
   const capturePhoto = () => {
     const video = videoRef.current
-    if (!video || !cameraReady || !video.videoWidth) return
+    if (!video || !cameraReady || !video.videoWidth || isRecording) return
 
     const doCapture = () => {
       const canvas = canvasRef.current
@@ -390,46 +423,65 @@ export default function CreatePostPage() {
     }
   }
 
-  /* Video capture — handed off entirely to the OS camera/video app via a
-     hidden file input. This in-page camera is photo-only; video always goes
-     through the system camera app, triggered by its own button (not a
-     gesture on the photo shutter).
+  /* In-app video recording — records straight off the same camera stream
+     that powers the live viewfinder, via MediaRecorder, instead of handing
+     off to the OS camera app. This keeps quality, framing, and flash
+     consistent with what the user sees, and avoids the "camera busy on
+     handoff" issues the OS path used to cause.
 
-     Stopping the tracks alone isn't always enough — on iOS Safari in
-     particular, the <video> element's srcObject can keep holding a
-     reference to the (now-stopped) stream, which keeps the session "open"
-     from the OS's point of view and is exactly why the system camera then
-     reports the camera as already in use on a call. So: stop every track,
-     then explicitly null out srcObject, then pause() the element, and give
-     it a beat before handing off — rather than firing the file input in the
-     same tick as stopping the stream. */
-  const releaseCamera = () => {
-    streamRef.current?.getTracks().forEach((t) => t.stop())
-    streamRef.current = null
-    if (videoRef.current) {
-      videoRef.current.pause()
-      videoRef.current.srcObject = null
+     Audio is only requested the first time someone actually taps record —
+     not on page load — so photo-only users never see a mic permission
+     prompt. Once granted, the audio stream is kept alive for the rest of
+     the session so subsequent recordings start instantly. */
+  const startRecording = useCallback(async () => {
+    if (!streamRef.current || isRecording || !cameraReady) return
+    try {
+      if (!audioStreamRef.current) {
+        audioStreamRef.current = await navigator.mediaDevices.getUserMedia({ audio: true })
+      }
+      const combined = new MediaStream([
+        ...streamRef.current.getVideoTracks(),
+        ...audioStreamRef.current.getAudioTracks(),
+      ])
+      const mimeType = getSupportedMimeType()
+      const recorder = new MediaRecorder(combined, {
+        ...(mimeType ? { mimeType } : {}),
+        videoBitsPerSecond: VIDEO_BITRATE,
+      })
+      recordedChunksRef.current = []
+      recorder.ondataavailable = (e) => { if (e.data.size > 0) recordedChunksRef.current.push(e.data) }
+      recorder.onstop = () => {
+        const blob = new Blob(recordedChunksRef.current, { type: mimeType || 'video/webm' })
+        const ext = mimeType.includes('mp4') ? 'mp4' : 'webm'
+        handleFiles([new File([blob], `video_${Date.now()}.${ext}`, { type: blob.type })])
+      }
+      recorder.start()
+      mediaRecorderRef.current = recorder
+      setIsRecording(true)
+      setRecordSeconds(0)
+      recordTimerRef.current = setInterval(() => {
+        setRecordSeconds((s) => {
+          if (s + 1 >= MAX_RECORD_SECONDS) {
+            mediaRecorderRef.current?.stop()
+            clearInterval(recordTimerRef.current)
+            setIsRecording(false)
+            return MAX_RECORD_SECONDS
+          }
+          return s + 1
+        })
+      }, 1000)
+    } catch (err) {
+      console.error('Could not start recording', err)
+      toast.error('Microphone access is needed to record video')
     }
-    setCameraReady(false)
-  }
+  }, [isRecording, cameraReady, handleFiles])
 
-  const openVideoCapture = () => {
-    releaseCamera()
-    // Give the browser/OS a moment to actually free the hardware before
-    // asking the system camera app for it — doing this in the same tick as
-    // stop() is the most common cause of the "still on a call" error.
-    setTimeout(() => {
-      videoFileRef.current?.click()
-    }, 250)
-
-    const resume = () => {
-      window.removeEventListener('focus', resume)
-      // give the OS camera app a beat to fully release the hardware on its
-      // way back out, too, before we try to reclaim it
-      setTimeout(() => startCamera(), 400)
-    }
-    window.addEventListener('focus', resume)
-  }
+  const stopRecording = useCallback(() => {
+    if (!isRecording) return
+    mediaRecorderRef.current?.stop()
+    clearInterval(recordTimerRef.current)
+    setIsRecording(false)
+  }, [isRecording])
 
   const removeMedia = (id, e) => {
     e?.stopPropagation()
@@ -444,6 +496,11 @@ export default function CreatePostPage() {
       return next
     })
     setActiveId((prev) => {
+      if (prev !== id) return prev
+      const next = mediaItems.filter((i) => i.id !== id)
+      return next[0]?.id || null
+    })
+    setPreviewId((prev) => {
       if (prev !== id) return prev
       const next = mediaItems.filter((i) => i.id !== id)
       return next[0]?.id || null
@@ -575,6 +632,18 @@ export default function CreatePostPage() {
             )}
           </AnimatePresence>
 
+          {/* Recording border + timer pill — clear "you're live" feedback
+              without blocking the frame like a full overlay would. */}
+          <AnimatePresence>
+            {isRecording && (
+              <motion.div
+                initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+                className="absolute inset-0 pointer-events-none z-10"
+                style={{ boxShadow: 'inset 0 0 0 3px #ef4444' }}
+              />
+            )}
+          </AnimatePresence>
+
           {/* Top header (over camera) */}
           <div className="absolute top-0 inset-x-0 z-20 flex items-center justify-between px-4"
             style={{
@@ -582,12 +651,27 @@ export default function CreatePostPage() {
               paddingBottom: 12,
               background: 'linear-gradient(to bottom, rgba(0,0,0,0.55), transparent)',
             }}>
-            <IconButton onClick={() => navigate(-1)} label="Close"><FiX size={20} /></IconButton>
-            <h1 className="text-[15px] font-semibold tracking-tight">New post</h1>
+            <IconButton onClick={() => navigate(-1)} label="Close" disabled={isRecording}><FiX size={20} /></IconButton>
+            {isRecording ? (
+              <div className="flex items-center gap-2 px-3 h-8 rounded-full" style={{ background: 'rgba(239,68,68,0.18)' }}>
+                <motion.span
+                  className="w-2 h-2 rounded-full"
+                  style={{ background: '#ef4444' }}
+                  animate={{ opacity: [1, 0.3, 1] }}
+                  transition={{ duration: 1, repeat: Infinity }}
+                />
+                <span className="text-[13px] font-bold tabular-nums">
+                  0:{String(recordSeconds).padStart(2, '0')}
+                </span>
+              </div>
+            ) : (
+              <h1 className="text-[15px] font-semibold tracking-tight">New post</h1>
+            )}
             <div className="flex items-center gap-2">
               <IconButton
                 onClick={toggleFlash}
                 label="Flash"
+                disabled={isRecording}
                 style={{ color: flashOn ? '#fbbf24' : '#fff' }}
               >
                 <FiZap size={17} fill={flashOn ? '#fbbf24' : 'none'} />
@@ -595,13 +679,18 @@ export default function CreatePostPage() {
               <IconButton
                 onClick={() => setFacing((f) => f === 'user' ? 'environment' : 'user')}
                 label="Flip camera"
+                disabled={isRecording}
               >
                 <FiRotateCw size={16} />
               </IconButton>
-              <IconButton onClick={openVideoCapture} label="Record video">
-                <FiVideo size={17} />
+              <IconButton
+                onClick={isRecording ? stopRecording : startRecording}
+                label={isRecording ? 'Stop recording' : 'Record video'}
+                style={{ color: isRecording ? '#ef4444' : '#fff' }}
+              >
+                {isRecording ? <FiSquare size={15} fill="#ef4444" /> : <FiVideo size={17} />}
               </IconButton>
-              <IconButton onClick={() => fileRef.current?.click()} label="Gallery">
+              <IconButton onClick={() => fileRef.current?.click()} label="Gallery" disabled={isRecording}>
                 <FiImage size={17} />
               </IconButton>
             </div>
@@ -614,8 +703,9 @@ export default function CreatePostPage() {
 
         {/* Bottom control deck */}
         <div className="relative z-10" style={{ paddingBottom: 'max(env(safe-area-inset-bottom), 18px)' }}>
-          {/* Gallery strip — every captured/picked item lands here, tap to
-              mark it as the cover item for the edit screen. */}
+          {/* Gallery strip — every captured/picked item lands here. Tap to
+              open a full preview before deciding to keep it; the small X
+              still removes it directly without opening the preview. */}
           <div className="px-3 pb-3">
             <div className="flex items-center gap-2 overflow-x-auto no-scrollbar">
               {mediaItems.map((item) => {
@@ -624,7 +714,7 @@ export default function CreatePostPage() {
                   <motion.button
                     key={item.id}
                     layout
-                    onClick={() => setActiveId(item.id)}
+                    onClick={() => { setActiveId(item.id); setPreviewId(item.id) }}
                     className="relative flex-shrink-0 rounded-2xl overflow-hidden"
                     style={{
                       width: 62, height: 62,
@@ -676,13 +766,13 @@ export default function CreatePostPage() {
               translate() transform) so Framer Motion's own transform
               (whileTap scale) never overwrites a manual centering offset.
               That was the cause of the button "jumping" on every tap.
-              This shutter is photo-only — video is a separate button (top
-              bar) that hands off entirely to the OS camera app, so this
-              page's live preview never competes with it for the camera. */}
+              While recording, the shutter becomes a stop button so a single
+              row of controls handles both photo and video capture. */}
           <div className="relative flex items-center justify-between px-8 pb-2 min-h-[76px]">
             <button
               onClick={() => fileRef.current?.click()}
-              className="w-11 h-11 rounded-2xl flex items-center justify-center flex-shrink-0"
+              disabled={isRecording}
+              className="w-11 h-11 rounded-2xl flex items-center justify-center flex-shrink-0 disabled:opacity-30"
               style={{ background: 'rgba(255,255,255,0.08)', backdropFilter: 'blur(12px)' }}
             >
               <FiImage size={18} />
@@ -691,24 +781,30 @@ export default function CreatePostPage() {
             <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
               <motion.button
                 whileTap={{ scale: 0.88 }}
-                onClick={capturePhoto}
+                onClick={isRecording ? stopRecording : capturePhoto}
                 disabled={!cameraReady}
-                aria-label="Take photo"
+                aria-label={isRecording ? 'Stop recording' : 'Take photo'}
                 className="pointer-events-auto rounded-full flex items-center justify-center disabled:opacity-40"
                 style={{
                   width: 76, height: 76,
                   background: 'transparent',
-                  boxShadow: '0 0 0 3px #fff, 0 0 0 6px rgba(0,0,0,0.4)',
+                  boxShadow: isRecording
+                    ? '0 0 0 3px #ef4444, 0 0 0 6px rgba(0,0,0,0.4)'
+                    : '0 0 0 3px #fff, 0 0 0 6px rgba(0,0,0,0.4)',
                 }}
               >
-                <span style={{ width: 60, height: 60, borderRadius: '50%', background: '#fff', display: 'block' }} />
+                {isRecording ? (
+                  <span style={{ width: 28, height: 28, borderRadius: 8, background: '#ef4444', display: 'block' }} />
+                ) : (
+                  <span style={{ width: 60, height: 60, borderRadius: '50%', background: '#fff', display: 'block' }} />
+                )}
               </motion.button>
             </div>
 
             <motion.button
               whileTap={{ scale: 0.94 }}
               onClick={() => setScreen('edit')}
-              disabled={!canNext}
+              disabled={!canNext || isRecording}
               className="inline-flex items-center justify-center px-6 h-11 min-w-[84px] rounded-full text-sm font-semibold whitespace-nowrap disabled:opacity-30 flex-shrink-0"
               style={{
                 background: canNext
@@ -782,8 +878,11 @@ export default function CreatePostPage() {
               <div className="flex-1 overflow-y-auto px-4 py-3">
                 {/* Caption */}
                 <div className="flex gap-3 mb-4">
-                  <div className="w-[76px] h-[76px] rounded-xl overflow-hidden flex-shrink-0 relative"
-                    style={{ background: '#000', boxShadow: '0 0 0 1px rgba(255,255,255,0.06)' }}>
+                  <div
+                    className="w-[76px] h-[76px] rounded-xl overflow-hidden flex-shrink-0 relative cursor-pointer"
+                    style={{ background: '#000', boxShadow: '0 0 0 1px rgba(255,255,255,0.06)' }}
+                    onClick={() => activeItem && setPreviewId(activeItem.id)}
+                  >
                     {activeItem?.isVideo && activeItem.preview ? (
                       <BoomerangVideo src={activeItem.preview} className="w-full h-full object-cover" />
                     ) : activeItem?.preview ? (
@@ -868,24 +967,100 @@ export default function CreatePostPage() {
         onChange={(e) => { handleFiles(e.target.files); e.target.value = '' }}
       />
 
-      {/* hidden video-capture input — opens the OS's own video recorder app.
-          Kept separate from the gallery input above so it can be triggered
-          on its own (long-press shutter) without also opening the picker. */}
-      <input
-        ref={videoFileRef}
-        type="file"
-        accept="video/*"
-        capture="environment"
-        className="hidden"
-        onChange={(e) => { handleFiles(e.target.files); e.target.value = '' }}
-      />
+      {/* ─── Media preview modal — tap any thumbnail to review it full-screen
+          before posting. Swipe/step between items, remove, or dismiss. ─── */}
+      <AnimatePresence>
+        {previewItem && (
+          <motion.div
+            initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[70] flex flex-col items-center justify-center"
+            style={{ background: 'rgba(0,0,0,0.94)' }}
+            onClick={() => setPreviewId(null)}
+          >
+            <button
+              onClick={() => setPreviewId(null)}
+              aria-label="Close preview"
+              className="absolute top-4 right-4 z-10 w-9 h-9 rounded-full flex items-center justify-center"
+              style={{ background: 'rgba(255,255,255,0.1)' }}
+            >
+              <FiX size={18} />
+            </button>
+
+            {mediaItems.length > 1 && (
+              <span className="absolute top-5 left-5 text-xs font-semibold px-2.5 py-1 rounded-full"
+                style={{ background: 'rgba(255,255,255,0.1)' }}>
+                {previewIndex + 1} / {mediaItems.length}
+              </span>
+            )}
+
+            <div className="relative w-full flex-1 flex items-center justify-center px-4" onClick={(e) => e.stopPropagation()}>
+              {previewIndex > 0 && (
+                <button
+                  onClick={() => setPreviewId(mediaItems[previewIndex - 1].id)}
+                  aria-label="Previous"
+                  className="absolute left-2 z-10 w-9 h-9 rounded-full flex items-center justify-center"
+                  style={{ background: 'rgba(255,255,255,0.1)' }}
+                >
+                  <FiArrowLeft size={16} />
+                </button>
+              )}
+
+              {previewItem.isVideo ? (
+                <video
+                  key={previewItem.id}
+                  src={previewItem.preview}
+                  controls
+                  autoPlay
+                  playsInline
+                  className="max-w-full max-h-[70vh] rounded-xl"
+                />
+              ) : (
+                <img
+                  key={previewItem.id}
+                  src={previewItem.preview}
+                  alt=""
+                  className="max-w-full max-h-[70vh] rounded-xl object-contain"
+                />
+              )}
+
+              {previewIndex < mediaItems.length - 1 && (
+                <button
+                  onClick={() => setPreviewId(mediaItems[previewIndex + 1].id)}
+                  aria-label="Next"
+                  className="absolute right-2 z-10 w-9 h-9 rounded-full flex items-center justify-center"
+                  style={{ background: 'rgba(255,255,255,0.1)' }}
+                >
+                  <FiArrowLeft size={16} style={{ transform: 'rotate(180deg)' }} />
+                </button>
+              )}
+            </div>
+
+            <div className="flex items-center gap-3 pb-8" onClick={(e) => e.stopPropagation()}>
+              <button
+                onClick={() => removeMedia(previewItem.id)}
+                className="px-5 h-10 rounded-full text-sm font-semibold"
+                style={{ background: 'rgba(239,68,68,0.15)', color: '#ef4444' }}
+              >
+                Remove
+              </button>
+              <button
+                onClick={() => setPreviewId(null)}
+                className="px-5 h-10 rounded-full text-sm font-semibold"
+                style={{ background: 'rgba(255,255,255,0.1)' }}
+              >
+                Done
+              </button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Upload overlay */}
       <AnimatePresence>
         {loading && (
           <motion.div
             initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-            className="fixed inset-0 z-[60] flex items-center justify-center"
+            className="fixed inset-0 z-[80] flex items-center justify-center"
             style={{ background: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(14px)' }}
           >
             <motion.div
@@ -958,12 +1133,13 @@ export default function CreatePostPage() {
 }
 
 /* small helper */
-function IconButton({ children, onClick, label, style }) {
+function IconButton({ children, onClick, label, style, disabled }) {
   return (
     <button
       onClick={onClick}
       aria-label={label}
-      className="w-9 h-9 rounded-full flex items-center justify-center active:scale-95 transition flex-shrink-0"
+      disabled={disabled}
+      className="w-9 h-9 rounded-full flex items-center justify-center active:scale-95 transition flex-shrink-0 disabled:opacity-30"
       style={{
         background: 'rgba(0,0,0,0.4)',
         backdropFilter: 'blur(12px)',

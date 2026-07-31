@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   FiX, FiZap, FiImage, FiCheck, FiArrowLeft,
-  FiPlay, FiRotateCw, FiCamera, FiVideo, FiSquare,
+  FiPlay, FiRotateCw, FiCamera,
 } from 'react-icons/fi'
 import { postsAPI, uploadAPI, uploadMediaDirect } from '../api'
 import toast from 'react-hot-toast'
@@ -16,6 +16,7 @@ const MAX_VIDEO_SIZE = 100 * 1024 * 1024
 const SIGNATURE_TTL = 8 * 60 * 1000
 const MAX_RECORD_SECONDS = 60
 const VIDEO_BITRATE = 5_000_000 // 5 Mbps — noticeably sharper than typical browser defaults
+const HOLD_THRESHOLD_MS = 300 // press-and-hold this long to start recording; shorter = photo
 
 let idSeq = 0
 const nextId = () => `media_${Date.now()}_${idSeq++}`
@@ -25,11 +26,6 @@ const nextId = () => `media_${Date.now()}_${idSeq++}`
 function compressImage(file) {
   return new Promise((resolve) => {
     if (!file.type.startsWith('image/')) return resolve(file)
-    // Captures from our own in-app camera are already sized and encoded
-    // once in capturePhoto() at full quality. Running them through a
-    // second lossy resize/re-encode pass here was the main cause of soft,
-    // muddy in-app photos — so skip this step for anything we captured
-    // ourselves and only compress gallery-picked files.
     if (file.name.startsWith('capture_')) return resolve(file)
     const img = new window.Image()
     const url = URL.createObjectURL(file)
@@ -58,10 +54,6 @@ function compressImage(file) {
   })
 }
 
-// Picks the best video container/codec this browser actually supports for
-// MediaRecorder. Order matters: prefer mp4/h264 where available (iOS Safari
-// 17+, some Android/Chrome versions) since it's universally playable;
-// fall back to webm/vp9 then webm/vp8 for everyone else.
 function getSupportedMimeType() {
   const candidates = [
     'video/mp4;codecs=avc1,mp4a.40.2',
@@ -76,11 +68,6 @@ function getSupportedMimeType() {
   return ''
 }
 
-// Video previews: files are either a freshly-recorded in-app clip or a
-// gallery pick — either way they're a finished file, so a plain object URL
-// is safe and instant to preview. Rendered the same boomerang (forward,
-// then reverse) way the main feed grid does, so the composer and feed look
-// and feel consistent.
 function BoomerangVideo({ src, className, style }) {
   const videoRef = useRef(null)
   const rafRef = useRef(null)
@@ -155,6 +142,9 @@ export default function CreatePostPage() {
   const abortControllerRef = useRef(null)
   const signatureRef = useRef(null)
   const videoUrlsRef = useRef(new Set())
+  const holdTimerRef = useRef(null)
+  const isHoldingRef = useRef(false)
+  const isRecordingRef = useRef(false)
 
   const [screen, setScreen] = useState('capture')
   const [mediaItems, setMediaItems] = useState([])
@@ -184,13 +174,6 @@ export default function CreatePostPage() {
   const previewIndex = mediaItems.findIndex((i) => i.id === previewId)
   const previewItem = previewIndex >= 0 ? mediaItems[previewIndex] : null
 
-  // Hide the app's persistent bottom nav while this full-screen composer is
-  // mounted. This page renders as a `fixed inset-0` overlay, but the bottom
-  // nav lives elsewhere in the tree as its own fixed-position component, so
-  // z-index on this page alone doesn't guarantee it's covered. Injecting the
-  // rule directly here targets common bottom-nav markup conventions so this
-  // works without editing another file. If your nav still shows through,
-  // add its real class/id to the selector list below.
   useEffect(() => {
     const style = document.createElement('style')
     style.setAttribute('data-composer-nav-hide', 'true')
@@ -224,19 +207,6 @@ export default function CreatePostPage() {
     return promise
   }, [])
 
-  /* camera — handles both photo capture and in-app video recording, so it
-     stays open the whole time this screen is mounted; we never hand off to
-     the OS camera app anymore.
-
-     Resolution: we request a realistic 16:9 `ideal` frame (not a forced
-     square). Forcing width and height to the same "ideal" value here used
-     to make the browser pick a resolution mode cropped tightly toward 1:1
-     to satisfy both constraints — since no phone sensor is natively
-     square, that crop looked exactly like an unwanted zoom. Requesting a
-     normal widescreen frame and letting `object-cover` handle the crop for
-     display (same as any native camera app) fixes it. `ideal` (not
-     `min`/exact) so it still degrades gracefully on weaker devices instead
-     of failing outright. */
   const startCamera = useCallback(async () => {
     try {
       streamRef.current?.getTracks().forEach((t) => t.stop())
@@ -262,12 +232,6 @@ export default function CreatePostPage() {
       }
       setCameraReady(true); setCameraError(false)
 
-      // Torch (hardware flashlight) support check. This is a real hardware
-      // capability, not a bug we can work around: iOS (Safari, and every
-      // other iOS browser, since they all run on WKWebView) never exposes
-      // `torch` in getCapabilities() at all. Only Chromium-based browsers
-      // on Android generally support it. That's why flash falls back to a
-      // screen flash below whenever this comes back false.
       const track = stream.getVideoTracks()[0]
       const supportsTorch = !!track?.getCapabilities?.().torch
       setTorchSupported(supportsTorch)
@@ -297,6 +261,7 @@ export default function CreatePostPage() {
     videoUrlsRef.current.forEach((url) => URL.revokeObjectURL(url))
     audioStreamRef.current?.getTracks().forEach((t) => t.stop())
     clearInterval(recordTimerRef.current)
+    clearTimeout(holdTimerRef.current)
   }, [])
 
   const toggleFlash = async () => {
@@ -311,9 +276,6 @@ export default function CreatePostPage() {
         toast.error('Flash failed on this device')
       }
     } else {
-      // No hardware torch on this device/browser (always true on iOS — see
-      // note above). Screen-flash fallback: capturePhoto() below fires a
-      // full-brightness pulse right before the shot instead.
       setFlashOn(next)
       if (next) toast('No hardware flash here — using a bright screen flash for photos instead', { icon: '💡' })
     }
@@ -347,9 +309,6 @@ export default function CreatePostPage() {
       const id = nextId()
       const isVideo = f.type.startsWith('video/')
       if (isVideo) {
-        // The file here is a finished clip (in-app recording or gallery
-        // pick), so a plain object URL is safe and instant — no need to
-        // wait on anything async the way the image compression path does.
         const url = URL.createObjectURL(f)
         videoUrlsRef.current.add(url)
         setMediaItems((prev) => [...prev, { id, file: f, preview: url, compressing: false, isVideo: true }])
@@ -366,27 +325,11 @@ export default function CreatePostPage() {
         })()
       }
     })
-    // Deliberately NOT auto-selecting the newly captured/added item here.
-    // The viewfinder always shows the live camera; captured shots land in
-    // the thumbnail strip below so the next shot can be taken immediately.
-    // `activeId` stays whatever it was (usually null), and `activeItem`
-    // only matters once the user moves to the edit screen.
   }, [remainingSlots, mediaItems.length, getCachedSignature])
 
-  /* Front camera ("selfie") capture must match what's on screen. The live
-     preview is mirrored with CSS (scaleX(-1)) so it behaves like a real
-     mirror while framing a shot — but that's purely a visual flip on the
-     <video> element, it doesn't touch the underlying frames. If we draw
-     those raw frames straight to canvas, the saved photo comes out
-     un-mirrored: left/right ends up swapped compared to what you just saw
-     and posed for. Snapchat (and every other selfie camera) avoids this by
-     saving the mirrored version, not the raw sensor frame — so here we flip
-     the canvas horizontally before drawing whenever we're on the front
-     camera, to match. The rear camera is never mirrored, on screen or in
-     the saved photo. */
   const capturePhoto = () => {
     const video = videoRef.current
-    if (!video || !cameraReady || !video.videoWidth || isRecording) return
+    if (!video || !cameraReady || !video.videoWidth || isRecordingRef.current) return
 
     const doCapture = () => {
       const canvas = canvasRef.current
@@ -406,35 +349,20 @@ export default function CreatePostPage() {
     }
 
     if (flashOn && !torchSupported) {
-      // Real screen-flash: full white, held a beat longer so it actually
-      // lights the subject (and reads unmistakably as "flash fired", unlike
-      // the quick shutter-click below).
       setFlashPulse(true)
       setTimeout(() => {
         doCapture()
         setTimeout(() => setFlashPulse(false), 180)
       }, 120)
     } else {
-      // Either flash is off, or torch is already lighting the scene
-      // continuously — just a quick, subtle click for shutter feedback.
       setShutterClick(true)
       setTimeout(() => setShutterClick(false), 90)
       doCapture()
     }
   }
 
-  /* In-app video recording — records straight off the same camera stream
-     that powers the live viewfinder, via MediaRecorder, instead of handing
-     off to the OS camera app. This keeps quality, framing, and flash
-     consistent with what the user sees, and avoids the "camera busy on
-     handoff" issues the OS path used to cause.
-
-     Audio is only requested the first time someone actually taps record —
-     not on page load — so photo-only users never see a mic permission
-     prompt. Once granted, the audio stream is kept alive for the rest of
-     the session so subsequent recordings start instantly. */
   const startRecording = useCallback(async () => {
-    if (!streamRef.current || isRecording || !cameraReady) return
+    if (!streamRef.current || isRecordingRef.current || !cameraReady) return
     try {
       if (!audioStreamRef.current) {
         audioStreamRef.current = await navigator.mediaDevices.getUserMedia({ audio: true })
@@ -457,6 +385,7 @@ export default function CreatePostPage() {
       }
       recorder.start()
       mediaRecorderRef.current = recorder
+      isRecordingRef.current = true
       setIsRecording(true)
       setRecordSeconds(0)
       recordTimerRef.current = setInterval(() => {
@@ -464,6 +393,8 @@ export default function CreatePostPage() {
           if (s + 1 >= MAX_RECORD_SECONDS) {
             mediaRecorderRef.current?.stop()
             clearInterval(recordTimerRef.current)
+            isRecordingRef.current = false
+            isHoldingRef.current = false
             setIsRecording(false)
             return MAX_RECORD_SECONDS
           }
@@ -472,16 +403,52 @@ export default function CreatePostPage() {
       }, 1000)
     } catch (err) {
       console.error('Could not start recording', err)
+      isHoldingRef.current = false
       toast.error('Microphone access is needed to record video')
     }
-  }, [isRecording, cameraReady, handleFiles])
+  }, [cameraReady, handleFiles])
 
   const stopRecording = useCallback(() => {
-    if (!isRecording) return
+    if (!isRecordingRef.current) return
     mediaRecorderRef.current?.stop()
     clearInterval(recordTimerRef.current)
+    isRecordingRef.current = false
     setIsRecording(false)
-  }, [isRecording])
+  }, [])
+
+  /* Press-and-hold shutter: a quick tap takes a photo, holding past
+     HOLD_THRESHOLD_MS starts video recording (release to stop) — same
+     gesture as Instagram/Snapchat/TikTok, so there's no separate video
+     button. Pointer events so it works the same for touch and mouse. */
+  const handleShutterDown = (e) => {
+    e.preventDefault()
+    if (!cameraReady || isRecordingRef.current) return
+    isHoldingRef.current = false
+    clearTimeout(holdTimerRef.current)
+    holdTimerRef.current = setTimeout(() => {
+      isHoldingRef.current = true
+      startRecording()
+    }, HOLD_THRESHOLD_MS)
+  }
+
+  const handleShutterUp = (e) => {
+    e.preventDefault()
+    clearTimeout(holdTimerRef.current)
+    if (isHoldingRef.current) {
+      isHoldingRef.current = false
+      stopRecording()
+    } else if (cameraReady && !isRecordingRef.current) {
+      capturePhoto()
+    }
+  }
+
+  const handleShutterCancel = () => {
+    clearTimeout(holdTimerRef.current)
+    if (isHoldingRef.current) {
+      isHoldingRef.current = false
+      stopRecording()
+    }
+  }
 
   const removeMedia = (id, e) => {
     e?.stopPropagation()
@@ -575,9 +542,6 @@ export default function CreatePostPage() {
           pointerEvents: screen === 'edit' ? 'none' : 'auto',
         }}
       >
-        {/* Viewfinder — always shows the live camera. Captured shots are
-            never overlaid here; they only appear in the thumbnail strip
-            below, so the feed stays clear and ready for the next shot. */}
         <div className="relative flex-1" style={{ background: '#0a0a0a' }}>
           {!cameraError && (
             <video
@@ -605,8 +569,6 @@ export default function CreatePostPage() {
             </div>
           )}
 
-          {/* Real flash: full-white, held a beat — this is the actual light
-              source on devices with no hardware torch (see capturePhoto). */}
           <AnimatePresence>
             {flashPulse && (
               <motion.div
@@ -618,9 +580,6 @@ export default function CreatePostPage() {
             )}
           </AnimatePresence>
 
-          {/* Shutter click: quick, low-opacity — just feedback that a photo
-              was taken, deliberately much weaker than the real flash above
-              so the two are never confused for each other. */}
           <AnimatePresence>
             {shutterClick && (
               <motion.div
@@ -632,8 +591,6 @@ export default function CreatePostPage() {
             )}
           </AnimatePresence>
 
-          {/* Recording border + timer pill — clear "you're live" feedback
-              without blocking the frame like a full overlay would. */}
           <AnimatePresence>
             {isRecording && (
               <motion.div
@@ -644,7 +601,6 @@ export default function CreatePostPage() {
             )}
           </AnimatePresence>
 
-          {/* Top header (over camera) */}
           <div className="absolute top-0 inset-x-0 z-20 flex items-center justify-between px-4"
             style={{
               paddingTop: 'max(env(safe-area-inset-top), 14px)',
@@ -683,29 +639,17 @@ export default function CreatePostPage() {
               >
                 <FiRotateCw size={16} />
               </IconButton>
-              <IconButton
-                onClick={isRecording ? stopRecording : startRecording}
-                label={isRecording ? 'Stop recording' : 'Record video'}
-                style={{ color: isRecording ? '#ef4444' : '#fff' }}
-              >
-                {isRecording ? <FiSquare size={15} fill="#ef4444" /> : <FiVideo size={17} />}
-              </IconButton>
               <IconButton onClick={() => fileRef.current?.click()} label="Gallery" disabled={isRecording}>
                 <FiImage size={17} />
               </IconButton>
             </div>
           </div>
 
-          {/* Bottom gradient */}
           <div className="absolute inset-x-0 bottom-0 h-52 pointer-events-none"
             style={{ background: 'linear-gradient(to top, rgba(0,0,0,0.8), transparent)' }} />
         </div>
 
-        {/* Bottom control deck */}
         <div className="relative z-10" style={{ paddingBottom: 'max(env(safe-area-inset-bottom), 18px)' }}>
-          {/* Gallery strip — every captured/picked item lands here. Tap to
-              open a full preview before deciding to keep it; the small X
-              still removes it directly without opening the preview. */}
           <div className="px-3 pb-3">
             <div className="flex items-center gap-2 overflow-x-auto no-scrollbar">
               {mediaItems.map((item) => {
@@ -762,12 +706,9 @@ export default function CreatePostPage() {
             </div>
           </div>
 
-          {/* Shutter row — the shutter is centered via a flex wrapper (not a
-              translate() transform) so Framer Motion's own transform
-              (whileTap scale) never overwrites a manual centering offset.
-              That was the cause of the button "jumping" on every tap.
-              While recording, the shutter becomes a stop button so a single
-              row of controls handles both photo and video capture. */}
+          {/* Shutter row — tap = photo, press-and-hold = video (release to
+              stop). One control, matching Instagram/Snapchat/TikTok's
+              shutter gesture — no separate video button. */}
           <div className="relative flex items-center justify-between px-8 pb-2 min-h-[76px]">
             <button
               onClick={() => fileRef.current?.click()}
@@ -780,14 +721,20 @@ export default function CreatePostPage() {
 
             <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
               <motion.button
-                whileTap={{ scale: 0.88 }}
-                onClick={isRecording ? stopRecording : capturePhoto}
+                whileTap={{ scale: isRecording ? 1 : 0.88 }}
+                animate={isRecording ? { scale: 1.12 } : { scale: 1 }}
+                onPointerDown={handleShutterDown}
+                onPointerUp={handleShutterUp}
+                onPointerLeave={handleShutterCancel}
+                onPointerCancel={handleShutterCancel}
+                onContextMenu={(e) => e.preventDefault()}
                 disabled={!cameraReady}
-                aria-label={isRecording ? 'Stop recording' : 'Take photo'}
+                aria-label={isRecording ? 'Recording — release to stop' : 'Tap for photo, hold for video'}
                 className="pointer-events-auto rounded-full flex items-center justify-center disabled:opacity-40"
                 style={{
                   width: 76, height: 76,
                   background: 'transparent',
+                  touchAction: 'none',
                   boxShadow: isRecording
                     ? '0 0 0 3px #ef4444, 0 0 0 6px rgba(0,0,0,0.4)'
                     : '0 0 0 3px #fff, 0 0 0 6px rgba(0,0,0,0.4)',
@@ -843,12 +790,10 @@ export default function CreatePostPage() {
                 boxShadow: '0 -24px 60px rgba(0,0,0,0.55)',
               }}
             >
-              {/* grabber */}
               <div className="flex justify-center pt-2.5 pb-1">
                 <span className="w-9 h-1 rounded-full" style={{ background: 'rgba(255,255,255,0.2)' }} />
               </div>
 
-              {/* header */}
               <div className="flex items-center justify-between px-4 py-3 gap-3">
                 <button
                   onClick={() => setScreen('capture')}
@@ -876,7 +821,6 @@ export default function CreatePostPage() {
               </div>
 
               <div className="flex-1 overflow-y-auto px-4 py-3">
-                {/* Caption */}
                 <div className="flex gap-3 mb-4">
                   <div
                     className="w-[76px] h-[76px] rounded-xl overflow-hidden flex-shrink-0 relative cursor-pointer"
@@ -919,7 +863,6 @@ export default function CreatePostPage() {
                   <p className="text-xs mb-4" style={{ color: '#ef4444' }}>{errors.content}</p>
                 )}
 
-                {/* Thumbs row */}
                 {mediaItems.length > 1 && (
                   <div className="flex gap-2 mb-5 overflow-x-auto no-scrollbar">
                     {mediaItems.map((item) => {
@@ -957,7 +900,6 @@ export default function CreatePostPage() {
         )}
       </AnimatePresence>
 
-      {/* hidden gallery file input — images and videos, picked from library */}
       <input
         ref={fileRef}
         type="file"
@@ -967,8 +909,6 @@ export default function CreatePostPage() {
         onChange={(e) => { handleFiles(e.target.files); e.target.value = '' }}
       />
 
-      {/* ─── Media preview modal — tap any thumbnail to review it full-screen
-          before posting. Swipe/step between items, remove, or dismiss. ─── */}
       <AnimatePresence>
         {previewItem && (
           <motion.div
@@ -1055,7 +995,6 @@ export default function CreatePostPage() {
         )}
       </AnimatePresence>
 
-      {/* Upload overlay */}
       <AnimatePresence>
         {loading && (
           <motion.div

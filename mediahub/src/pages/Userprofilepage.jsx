@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
-import { FiGrid, FiArrowLeft, FiUser, FiLayers, FiDownload, FiLoader, FiPlay } from 'react-icons/fi'
+import { FiGrid, FiArrowLeft, FiUser, FiLayers, FiDownload, FiLoader, FiPlay, FiShare2 } from 'react-icons/fi'
 import { useAuthStore, usePostStore } from '../store'
 import { Avatar, EmptyState } from '../components/ui'
 import { getImageUrls } from '../components/PostMedia'
@@ -81,6 +81,31 @@ export default function UserProfilePage() {
     }
   }
 
+  // Share this person's profile the same way a post gets shared — native
+  // share sheet where available, clipboard copy as the fallback. NOTE:
+  // adjust the path below if the public profile route isn't `/profile/:id`.
+  const handleShareProfile = async () => {
+    const shareUrl = `${window.location.origin}/profile/${userId}`
+    const shareData = {
+      title: profileUser?.name || 'Profile',
+      text: `Check out ${profileUser?.name || 'this'}'s profile`,
+      url: shareUrl,
+    }
+    try {
+      if (navigator.share) {
+        await navigator.share(shareData)
+      } else {
+        await navigator.clipboard.writeText(shareUrl)
+        toast.success('Profile link copied')
+      }
+    } catch (err) {
+      if (err.name !== 'AbortError') {
+        console.error('Share failed:', err)
+        toast.error('Failed to share profile')
+      }
+    }
+  }
+
   const memberSince = profileUser?.createdAt ? dayjs(profileUser.createdAt).format('MMM YYYY') : '—'
 
   if (loading || isLoading) {
@@ -102,7 +127,7 @@ export default function UserProfilePage() {
 
   return (
     <div className="min-h-dvh pb-20 fade-in" style={{ background: 'var(--bg-primary)' }}>
-      <div className="max-w-3xl lg:max-w-5xl mx-auto px-5 pt-6">
+      <div className="max-w-3xl lg:max-w-5xl mx-auto px-5" style={{ paddingTop: 'max(env(safe-area-inset-top), 28px)' }}>
 
         {/* Top bar */}
         <div className="flex items-center justify-between mb-10">
@@ -111,10 +136,22 @@ export default function UserProfilePage() {
             whileTap={{ scale: 0.9 }}
             onClick={() => navigate(-1)}
             aria-label="Go back"
-            className="p-2 -ml-2 rounded-full hover:bg-black/5 dark:hover:bg-white/10 transition-colors"
-            style={{ color: 'var(--text-primary)' }}
+            className="w-10 h-10 flex items-center justify-center rounded-full transition-colors"
+            style={{ background: 'var(--bg-secondary)', color: 'var(--text-primary)' }}
           >
             <FiArrowLeft size={20} />
+          </motion.button>
+
+          <motion.button
+            whileHover={{ scale: 1.04 }}
+            whileTap={{ scale: 0.94 }}
+            onClick={handleShareProfile}
+            aria-label="Share profile"
+            className="flex items-center gap-1.5 px-4 h-10 rounded-full text-sm font-semibold transition-colors"
+            style={{ background: 'var(--bg-secondary)', color: 'var(--text-primary)' }}
+          >
+            <FiShare2 size={15} />
+            Share
           </motion.button>
         </div>
 
@@ -162,11 +199,8 @@ export default function UserProfilePage() {
 
         {/* Posts */}
         <div className="mt-12">
-          <div className="flex items-center justify-between mb-3">
-            <div className="flex items-center gap-2">
-              <FiGrid size={14} style={{ color: 'var(--text-muted)' }} />
-              <span className="text-sm font-bold" style={{ color: 'var(--text-primary)' }}>Posts</span>
-            </div>
+          <div className="flex items-center mb-3">
+            <FiGrid size={14} style={{ color: 'var(--text-muted)' }} />
           </div>
 
           {userPosts.length === 0 ? (
@@ -180,8 +214,8 @@ export default function UserProfilePage() {
               initial="hidden"
               animate="show"
               variants={{ hidden: {}, show: { transition: { staggerChildren: 0.03 } } }}
-              className="grid grid-cols-3 gap-px"
-              style={{ background: 'var(--border)' }}
+              className="grid grid-cols-3 gap-0.5"
+              style={{ background: 'var(--bg-primary)' }}
             >
               <AnimatePresence>
                 {userPosts.map(post => {
@@ -208,7 +242,7 @@ export default function UserProfilePage() {
                       transition={{ type: 'spring', stiffness: 300, damping: 24 }}
                       onClick={() => navigate(`/posts/${post._id || post.id}`)}
                       className="cursor-pointer overflow-hidden group relative"
-                      style={{ aspectRatio: '1/1', background: 'var(--bg-secondary)' }}
+                      style={{ aspectRatio: '1/1', background: 'var(--bg-secondary)', boxShadow: 'inset 0 0 0 0.5px var(--border)' }}
                     >
                       {/* Multiple media badge (only for images) */}
                       {hasMultiple && !hasVideos && (

@@ -205,7 +205,7 @@
 
 import axios from 'axios';
 
-export const API_URL = 'https://media-hub-bq9w.onrender.com';
+export const API_URL = process.env.VITE_BACKEND_API;
 
 console.log('🔍 API_URL:', API_URL);
 
